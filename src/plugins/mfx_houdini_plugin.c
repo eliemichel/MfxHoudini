@@ -25,324 +25,435 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdarg.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif // _WIN32
 
 #define kMainInput "MainInput"
 #define kMainOutput "MainOutput"
 
-// Houdini
+ // Houdini
 
 typedef struct HoudiniRuntime {
-  HAPI_Session hsession;
-  HAPI_AssetLibraryId library;
-  HAPI_NodeId node_id;
-  HAPI_StringHandle *asset_names_array;
-  char current_library_path[1024];
-  int current_asset_index;
-  int asset_count;
-  
-  int parm_count;
-  HAPI_ParmInfo *parm_infos_array;
-  int sop_count;
-  HAPI_NodeId *sop_array;
+	HAPI_Session hsession;
+	HAPI_AssetLibraryId library;
+	HAPI_NodeId node_id;
+	HAPI_StringHandle *asset_names_array;
+	char current_library_path[1024];
+	int current_asset_index;
+	int asset_count;
+
+	int parm_count;
+	HAPI_ParmInfo *parm_infos_array;
+	int sop_count;
+	HAPI_NodeId *sop_array;
+	char *error_message;
 } HoudiniRuntime;
 
 // Global session
 static HAPI_Session global_hsession;
 static int global_hsession_users = 0;
 
+static void hruntime_set_error(HoudiniRuntime *hr, const char *fmt, ...) {
+	va_list args;
+	int len;
+
+	if (NULL == hr->error_message) {
+		free_array(hr->error_message);
+		hr->error_message = NULL;
+	}
+
+	va_start(args, fmt);
+	len = vsnprintf(NULL, 0, fmt, args);
+	va_end(args);
+
+	hr->error_message = malloc_array(sizeof(char), len + 1, "hruntime error message");
+
+	va_start(args, fmt);
+	vsprintf(hr->error_message, fmt, args);
+	va_end(args);
+
+	fprintf(stderr, "Houdini Runtime error: %s", hr->error_message);
+}
+#define ERR(...) hruntime_set_error(hr, __VA_ARGS__)
+
 static bool hruntime_init(HoudiniRuntime *hr) {
-  HAPI_Result res;
-  
-  if (0 == global_hsession_users) {
-    HAPI_CookOptions cookOptions;
-    cookOptions.maxVerticesPerPrimitive = 3; // TODO: switch back to -1 when it works with 3
+	HAPI_Result res;
 
-    res = HAPI_CreateInProcessSession(&global_hsession);
-    if (HAPI_RESULT_SUCCESS != res) {
-      printf("Houdini error in HAPI_CreateInProcessSession: %u\n", res);
-      return false;
-    }
+	if (0 == global_hsession_users) {
+		HAPI_CookOptions cookOptions;
+		cookOptions.maxVerticesPerPrimitive = 3; // TODO: switch back to -1 when it works with 3
 
-    res = HAPI_Initialize(&global_hsession, &cookOptions, false /* threaded cooking */, -1, NULL, NULL, NULL, NULL, NULL);
-    if (HAPI_RESULT_SUCCESS != res) {
-      printf("Houdini error in HAPI_Initialize: %u\n", res);
-      return false;
-    }
-  }
+		res = HAPI_CreateInProcessSession(&global_hsession);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_CreateInProcessSession: %u\n", res);
+			return false;
+		}
 
-  global_hsession_users++;
+		res = HAPI_Initialize(&global_hsession, &cookOptions, false /* threaded cooking */, -1, NULL, NULL, NULL, NULL, NULL);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_Initialize: %u\n", res);
+			return false;
+		}
+	}
 
-  hr->hsession = global_hsession;
-  hr->current_library_path[0] = '\0';
-  hr->current_asset_index = -1;
-  hr->asset_names_array = NULL;
-  hr->asset_count = 0;
-  hr->parm_infos_array = NULL;
-  hr->parm_count = 0;
+	global_hsession_users++;
 
-  return true;
+	hr->hsession = global_hsession;
+	hr->current_library_path[0] = '\0';
+	hr->current_asset_index = -1;
+	hr->asset_names_array = NULL;
+	hr->asset_count = 0;
+	hr->parm_infos_array = NULL;
+	hr->parm_count = 0;
+	hr->error_message = NULL;
+
+	return true;
 }
 
 static void hruntime_free(HoudiniRuntime *hr) {
-  if (NULL != hr->asset_names_array) {
-    free_array(hr->asset_names_array);
-  }
-  if (NULL != hr->parm_infos_array) {
-    free_array(hr->parm_infos_array);
-  }
+	if (NULL != hr->asset_names_array) {
+		free_array(hr->asset_names_array);
+	}
+	if (NULL != hr->parm_infos_array) {
+		free_array(hr->parm_infos_array);
+	}
 
-  global_hsession_users--;
-  if (0 == global_hsession_users) {
-    HAPI_Result res;
-    res = HAPI_Cleanup(&hr->hsession);
-    if (HAPI_RESULT_SUCCESS != res) {
-      printf("Houdini error in HAPI_Cleanup: %u\n", res);
-    }
-  }
-  free_array(hr);
+	if (NULL != hr->error_message) {
+		free_array(hr->error_message);
+	}
+
+	global_hsession_users--;
+	if (0 == global_hsession_users) {
+		HAPI_Result res;
+		res = HAPI_Cleanup(&hr->hsession);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_Cleanup: %u\n", res);
+		}
+	}
+	free_array(hr);
+}
+
+static void hruntime_close_library(HoudiniRuntime *hr) {
+	// TODO: Find a way to release the HAPI_AssetLibraryId
+
+	if (NULL != hr->asset_names_array) {
+		free_array(hr->asset_names_array);
+		hr->asset_names_array = NULL;
+	}
+}
+
+static bool hruntime_load_library(HoudiniRuntime *hr) {
+	// Load library
+	HAPI_Result res;
+	printf("Loading Houdini library %s...\n", hr->current_library_path);
+
+	res = HAPI_LoadAssetLibraryFromFile(&hr->hsession, hr->current_library_path, true, &hr->library);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_LoadAssetLibraryFromFile: %u\n", res);
+		return false;
+	}
+
+	// Update asset count
+	res = HAPI_GetAvailableAssetCount(&hr->hsession, hr->library, &hr->asset_count);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetAvailableAssetCount: %u\n", res);
+		return false;
+	}
+
+	printf("Found %d assets in Houdini library:\n", hr->asset_count);
+
+	hr->asset_names_array = malloc_array(sizeof(HAPI_StringHandle), hr->asset_count, "houdini asset names");
+	res = HAPI_GetAvailableAssets(&hr->hsession, hr->library, hr->asset_names_array, hr->asset_count);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetAvailableAssets: %u\n", res);
+		return false;
+	}
+
+	return true;
+}
+
+static void hruntime_set_library(HoudiniRuntime *hr, const char *new_library_path) {
+	if (0 != strcmp(hr->current_library_path, "")) {
+		hruntime_close_library(hr);
+	}
+
+	strcpy(hr->current_library_path, new_library_path);
+
+	if (0 == strcmp(hr->current_library_path, "")) {
+		printf("No Houdini library selected\n");
+		hr->asset_count = 0;
+		hr->current_asset_index = -1;
+	}
+	else {
+		hruntime_load_library(hr);
+	}
 }
 
 // OFX
 
 typedef struct PluginRuntime {
-    OfxHost *host;
-    OfxPropertySuiteV1 *propertySuite;
-    OfxParameterSuiteV1 *parameterSuite;
-    OfxMeshEffectSuiteV1 *meshEffectSuite;
+	OfxHost *host;
+	OfxPropertySuiteV1 *propertySuite;
+	OfxParameterSuiteV1 *parameterSuite;
+	OfxMeshEffectSuiteV1 *meshEffectSuite;
 } PluginRuntime;
 
 PluginRuntime plugin0_runtime;
 PluginRuntime plugin1_runtime;
 
 static OfxStatus plugin0_load(PluginRuntime *runtime) {
-    OfxHost *h = runtime->host;
-    runtime->propertySuite = (OfxPropertySuiteV1*)h->fetchSuite(h->host, kOfxPropertySuite, 1);
-    runtime->parameterSuite = (OfxParameterSuiteV1*)h->fetchSuite(h->host, kOfxParameterSuite, 1);
-    runtime->meshEffectSuite = (OfxMeshEffectSuiteV1*)h->fetchSuite(h->host, kOfxMeshEffectSuite, 1);
-    return kOfxStatOK;
+	OfxHost *h = runtime->host;
+	runtime->propertySuite = (OfxPropertySuiteV1*)h->fetchSuite(h->host, kOfxPropertySuite, 1);
+	runtime->parameterSuite = (OfxParameterSuiteV1*)h->fetchSuite(h->host, kOfxParameterSuite, 1);
+	runtime->meshEffectSuite = (OfxMeshEffectSuiteV1*)h->fetchSuite(h->host, kOfxMeshEffectSuite, 1);
+	return kOfxStatOK;
 }
 
 static OfxStatus plugin0_describe(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
-    if (NULL == runtime->propertySuite || NULL == runtime->meshEffectSuite) {
-        return kOfxStatErrMissingHostFeature;
-    }
+	if (NULL == runtime->propertySuite || NULL == runtime->meshEffectSuite) {
+		return kOfxStatErrMissingHostFeature;
+	}
 
-    OfxStatus status;
-    OfxPropertySetHandle propHandle;
+	OfxStatus status;
+	OfxPropertySetHandle propHandle;
 
-    status = runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
-    printf("Suite method 'getPropertySet' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
+	printf("Suite method 'getPropertySet' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    status = runtime->propertySuite->propSetString(propHandle, kOfxMeshEffectPropContext, 0, kOfxMeshEffectContextFilter);
-    printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->propertySuite->propSetString(propHandle, kOfxMeshEffectPropContext, 0, kOfxMeshEffectContextFilter);
+	printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    // Shall move into "describe in context" when it will exist
-    OfxPropertySetHandle inputProperties;
-    status = runtime->meshEffectSuite->inputDefine(meshEffect, kMainInput, &inputProperties);
-    printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+	// Shall move into "describe in context" when it will exist
+	OfxPropertySetHandle inputProperties;
+	status = runtime->meshEffectSuite->inputDefine(meshEffect, kMainInput, &inputProperties);
+	printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    status = runtime->propertySuite->propSetString(inputProperties, kOfxPropLabel, 0, "Main Input");
-    printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->propertySuite->propSetString(inputProperties, kOfxPropLabel, 0, "Main Input");
+	printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    OfxPropertySetHandle outputProperties;
-    status = runtime->meshEffectSuite->inputDefine(meshEffect, kMainOutput, &outputProperties); // yes, output are also "inputs", I should change this name in the API
-    printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+	OfxPropertySetHandle outputProperties;
+	status = runtime->meshEffectSuite->inputDefine(meshEffect, kMainOutput, &outputProperties); // yes, output are also "inputs", I should change this name in the API
+	printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    status = runtime->propertySuite->propSetString(outputProperties, kOfxPropLabel, 0, "Main Output");
-    printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->propertySuite->propSetString(outputProperties, kOfxPropLabel, 0, "Main Output");
+	printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    // Declare parameters
-    OfxParamSetHandle parameters;
-    OfxParamHandle param;
-    status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
-    printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
+	// Declare parameters
+	OfxParamSetHandle parameters;
+	OfxParamHandle param;
+	status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
+	printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeDouble, "width", NULL);
-    printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeDouble, "width", NULL);
+	printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeInteger, "steps", NULL);
-    printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeInteger, "steps", NULL);
+	printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeString, "path", NULL);
-    printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeString, "path", NULL);
+	printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    return kOfxStatOK;
+	return kOfxStatOK;
 }
 
 static OfxStatus plugin0_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
-    OfxStatus status;
-    OfxMeshInputHandle input, output;
-    OfxPropertySetHandle propertySet;
+	OfxStatus status;
+	OfxMeshInputHandle input, output;
+	OfxPropertySetHandle propertySet;
 
-    status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kMainInput, &input, &propertySet);
-    printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
-    if (status != kOfxStatOK) {
-        return kOfxStatErrUnknown;
-    }
+	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kMainInput, &input, &propertySet);
+	printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
+	if (status != kOfxStatOK) {
+		return kOfxStatErrUnknown;
+	}
 
-    status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kMainOutput, &output, &propertySet);
-    printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
-    if (status != kOfxStatOK) {
-        return kOfxStatErrUnknown;
-    }
+	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kMainOutput, &output, &propertySet);
+	printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
+	if (status != kOfxStatOK) {
+		return kOfxStatErrUnknown;
+	}
 
-    OfxTime time = 0;
-    OfxPropertySetHandle input_mesh;
-    status = runtime->meshEffectSuite->inputGetMesh(input, time, &input_mesh);
-    printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	OfxTime time = 0;
+	OfxPropertySetHandle input_mesh;
+	status = runtime->meshEffectSuite->inputGetMesh(input, time, &input_mesh);
+	printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    int input_point_count;
-    status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropPointCount, 0, &input_point_count);
-    printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
+	int input_point_count;
+	status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropPointCount, 0, &input_point_count);
+	printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    float *input_points;
-    status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropPointData, 0, (void**)&input_points);
-    printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
+	float *input_points;
+	status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropPointData, 0, (void**)&input_points);
+	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    printf("DEBUG: Found %d in input mesh\n", input_point_count);
+	printf("DEBUG: Found %d in input mesh\n", input_point_count);
 
-    // TODO: store input data
+	// TODO: store input data
 
-    status = runtime->meshEffectSuite->inputReleaseMesh(input_mesh);
-    printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->meshEffectSuite->inputReleaseMesh(input_mesh);
+	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    // Get parameters
-    OfxParamSetHandle parameters;
-    OfxParamHandle param;
-    status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
-    printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
+	// Get parameters
+	OfxParamSetHandle parameters;
+	OfxParamHandle param;
+	status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
+	printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    status = runtime->parameterSuite->paramGetHandle(parameters, "width", &param, NULL);
-    printf("Suite method 'paramGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->parameterSuite->paramGetHandle(parameters, "width", &param, NULL);
+	printf("Suite method 'paramGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    double width;
-    status = runtime->parameterSuite->paramGetValue(param, &width);
-    printf("Suite method 'paramGetValue' returned status %d (%s)\n", status, getOfxStateName(status));
+	double width;
+	status = runtime->parameterSuite->paramGetValue(param, &width);
+	printf("Suite method 'paramGetValue' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    printf("-- width parameter set to: %f\n", width);
+	printf("-- width parameter set to: %f\n", width);
 
-    // TODO: core cook
+	// TODO: core cook
 
-    OfxPropertySetHandle output_mesh;
-    status = runtime->meshEffectSuite->inputGetMesh(output, time, &output_mesh);
-    printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	OfxPropertySetHandle output_mesh;
+	status = runtime->meshEffectSuite->inputGetMesh(output, time, &output_mesh);
+	printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    int output_point_count = 0, output_vertex_count = 0, output_face_count = 0;
+	int output_point_count = 0, output_vertex_count = 0, output_face_count = 0;
 
-    // TODO: Consolidate geo counts
-    output_point_count = 4;
-    output_vertex_count = 4;
-    output_face_count = 1;
+	// TODO: Consolidate geo counts
+	output_point_count = 4;
+	output_vertex_count = 4;
+	output_face_count = 1;
 
-    printf("DEBUG: Allocating output mesh data: %d points, %d vertices, %d faces\n", output_point_count, output_vertex_count, output_face_count);
+	printf("DEBUG: Allocating output mesh data: %d points, %d vertices, %d faces\n", output_point_count, output_vertex_count, output_face_count);
 
-    status = runtime->meshEffectSuite->meshAlloc(output_mesh, output_point_count, output_vertex_count, output_face_count);
-    printf("Suite method 'meshAlloc' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->meshEffectSuite->meshAlloc(output_mesh, output_point_count, output_vertex_count, output_face_count);
+	printf("Suite method 'meshAlloc' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    float *output_points;
-    status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropPointData, 0, (void**)&output_points);
-    printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
+	float *output_points;
+	status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropPointData, 0, (void**)&output_points);
+	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    int *output_vertices;
-    status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropVertexData, 0, (void**)&output_vertices);
-    printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
+	int *output_vertices;
+	status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropVertexData, 0, (void**)&output_vertices);
+	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    int *output_faces;
-    status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropFaceData, 0, (void**)&output_faces);
-    printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
+	int *output_faces;
+	status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropFaceData, 0, (void**)&output_faces);
+	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    // TODO: Fill data
-    output_points[0 * 3 + 0] = -1.0f;
-    output_points[0 * 3 + 1] = -width;
-    output_points[0 * 3 + 2] = 0.0f;
+	// TODO: Fill data
+	output_points[0 * 3 + 0] = -1.0f;
+	output_points[0 * 3 + 1] = -width;
+	output_points[0 * 3 + 2] = 0.0f;
 
-    output_points[1 * 3 + 0] = 1.0f;
-    output_points[1 * 3 + 1] = -width;
-    output_points[1 * 3 + 2] = 0.0f;
+	output_points[1 * 3 + 0] = 1.0f;
+	output_points[1 * 3 + 1] = -width;
+	output_points[1 * 3 + 2] = 0.0f;
 
-    output_points[2 * 3 + 0] = 1.0f;
-    output_points[2 * 3 + 1] = width;
-    output_points[2 * 3 + 2] = 0.0f;
+	output_points[2 * 3 + 0] = 1.0f;
+	output_points[2 * 3 + 1] = width;
+	output_points[2 * 3 + 2] = 0.0f;
 
-    output_points[3 * 3 + 0] = -1.0f;
-    output_points[3 * 3 + 1] = width;
-    output_points[3 * 3 + 2] = 0.0f;
+	output_points[3 * 3 + 0] = -1.0f;
+	output_points[3 * 3 + 1] = width;
+	output_points[3 * 3 + 2] = 0.0f;
 
-    for (int i = 0 ; i < 4 ; ++i) output_vertices[i] = i;
+	for (int i = 0; i < 4; ++i) output_vertices[i] = i;
 
-    output_faces[0] = 4;
+	output_faces[0] = 4;
 
-    status = runtime->meshEffectSuite->inputReleaseMesh(output_mesh);
-    printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	status = runtime->meshEffectSuite->inputReleaseMesh(output_mesh);
+	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
-    return kOfxStatOK;
+	return kOfxStatOK;
 }
 
 static OfxStatus plugin0_mainEntry(const char *action,
-                                   const void *handle,
-                                   OfxPropertySetHandle inArgs,
-                                   OfxPropertySetHandle outArgs) {
-    if (0 == strcmp(action, kOfxActionLoad)) {
-        return plugin0_load(&plugin0_runtime);
-    }
-    if (0 == strcmp(action, kOfxActionDescribe)) {
-        return plugin0_describe(&plugin0_runtime, (OfxMeshEffectHandle)handle);
-    }
-    if (0 == strcmp(action, kOfxActionCreateInstance)) {
-        return kOfxStatOK;
-    }
-    if (0 == strcmp(action, kOfxActionDestroyInstance)) {
-        return kOfxStatOK;
-    }
-    if (0 == strcmp(action, kOfxMeshEffectActionCook)) {
-        return plugin0_cook(&plugin0_runtime, (OfxMeshEffectHandle)handle);
-    }
-    return kOfxStatReplyDefault;
+	const void *handle,
+	OfxPropertySetHandle inArgs,
+	OfxPropertySetHandle outArgs) {
+	if (0 == strcmp(action, kOfxActionLoad)) {
+		return plugin0_load(&plugin0_runtime);
+	}
+	if (0 == strcmp(action, kOfxActionDescribe)) {
+		return plugin0_describe(&plugin0_runtime, (OfxMeshEffectHandle)handle);
+	}
+	if (0 == strcmp(action, kOfxActionCreateInstance)) {
+		return kOfxStatOK;
+	}
+	if (0 == strcmp(action, kOfxActionDestroyInstance)) {
+		return kOfxStatOK;
+	}
+	if (0 == strcmp(action, kOfxMeshEffectActionCook)) {
+		return plugin0_cook(&plugin0_runtime, (OfxMeshEffectHandle)handle);
+	}
+	return kOfxStatReplyDefault;
 }
 
 static void plugin0_setHost(OfxHost *host) {
-    plugin0_runtime.host = host;
+	plugin0_runtime.host = host;
 }
 
 static OfxStatus plugin1_mainEntry(const char *action,
-                                   const void *handle,
-                                   OfxPropertySetHandle inArgs,
-                                   OfxPropertySetHandle outArgs) {
-    (void)action;
-    (void)handle;
-    (void)inArgs;
-    (void)outArgs;
-    return kOfxStatReplyDefault;
+	const void *handle,
+	OfxPropertySetHandle inArgs,
+	OfxPropertySetHandle outArgs) {
+	(void)action;
+	(void)handle;
+	(void)inArgs;
+	(void)outArgs;
+	return kOfxStatReplyDefault;
 }
 
 static void plugin1_setHost(OfxHost *host) {
-    plugin1_runtime.host = host;
+	plugin1_runtime.host = host;
+}
+
+#define MAX_BUNDLE_DIRECTORY 1024
+static char bundle_directory[MAX_BUNDLE_DIRECTORY];
+
+OfxExport void OfxSetBundleDirectory(const char *path) {
+	strncpy(bundle_directory, path, MAX_BUNDLE_DIRECTORY);
 }
 
 OfxExport int OfxGetNumberOfPlugins(void) {
-    return 2;
+	char path[MAX_BUNDLE_DIRECTORY];
+	size_t len = strlen(bundle_directory);
+	strcpy(path, bundle_directory);
+	strncpy(path + len, "\\library.hda", MAX_BUNDLE_DIRECTORY - len); // TODO: forward slash, resource folder
+
+	int num_plugins;
+	HoudiniRuntime *hr = malloc_array(sizeof(HoudiniRuntime), 1, "houdini runtime");
+	if (false == hruntime_init(hr)) {
+		return 0;
+	}
+
+	hruntime_set_library(hr, path);
+	num_plugins = hr->asset_count;
+	hruntime_free(hr);
+	return num_plugins;
 }
 
 OfxExport OfxPlugin *OfxGetPlugin(int nth) {
-    static OfxPlugin plugins[] = {
-        {
-        /* pluginApi */          kOfxMeshEffectPluginApi,
-        /* apiVersion */         kOfxMeshEffectPluginApiVersion,
-        /* pluginIdentifier */   "MfxSamplePlugin0",
-        /* pluginVersionMajor */ 1,
-        /* pluginVersionMinor */ 0,
-        /* setHost */            plugin0_setHost,
-        /* mainEntry */          plugin0_mainEntry
-        },
-        {
-        /* pluginApi */          kOfxMeshEffectPluginApi,
-        /* apiVersion */         kOfxMeshEffectPluginApiVersion,
-        /* pluginIdentifier */   "MfxSamplePlugin1",
-        /* pluginVersionMajor */ 1,
-        /* pluginVersionMinor */ 0,
-        /* setHost */            plugin1_setHost,
-        /* mainEntry */          plugin1_mainEntry
-        }
-    };
-    return plugins + nth;
+	static OfxPlugin plugins[] = {
+		{
+		/* pluginApi */          kOfxMeshEffectPluginApi,
+		/* apiVersion */         kOfxMeshEffectPluginApiVersion,
+		/* pluginIdentifier */   "MfxSamplePlugin0",
+		/* pluginVersionMajor */ 1,
+		/* pluginVersionMinor */ 0,
+		/* setHost */            plugin0_setHost,
+		/* mainEntry */          plugin0_mainEntry
+		},
+		{
+		/* pluginApi */          kOfxMeshEffectPluginApi,
+		/* apiVersion */         kOfxMeshEffectPluginApiVersion,
+		/* pluginIdentifier */   "MfxSamplePlugin1",
+		/* pluginVersionMajor */ 1,
+		/* pluginVersionMinor */ 0,
+		/* setHost */            plugin1_setHost,
+		/* mainEntry */          plugin1_mainEntry
+		}
+	};
+	return plugins + nth;
 }
