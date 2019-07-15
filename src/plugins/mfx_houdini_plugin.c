@@ -34,7 +34,73 @@
 #define kMainInput "MainInput"
 #define kMainOutput "MainOutput"
 
- // Houdini
+#define MAX_NUM_PLUGINS 10
+#define MAX_BUNDLE_DIRECTORY 1024
+#define MOD_HOUDINI_MAX_ASSET_NAME 1024
+#define MOD_HOUDINI_MAX_PARAMETER_NAME 256
+
+#define kOfxPropHoudiniNodeId "OfxPropHoudiniNodeId"
+
+// Utils
+
+inline int max(int a, int b) {
+  return (a > b) ? a : b;
+}
+
+inline int min(int a, int b) {
+  return (a < b) ? a : b;
+}
+
+const char * HAPI_ResultMessage(HAPI_Result res) {
+	static const char *messages[] = {
+		"HAPI_RESULT_SUCCESS",
+		"HAPI_RESULT_FAILURE",
+		"HAPI_RESULT_ALREADY_INITIALIZED",
+		"HAPI_RESULT_NOT_INITIALIZED",
+		"HAPI_RESULT_CANT_LOADFILE",
+		"HAPI_RESULT_PARM_SET_FAILED",
+		"HAPI_RESULT_INVALID_ARGUMENT",
+		"HAPI_RESULT_CANT_LOAD_GEO",
+		"HAPI_RESULT_CANT_GENERATE_PRESET",
+		"HAPI_RESULT_CANT_LOAD_PRESET",
+		"HAPI_RESULT_ASSET_DEF_ALREADY_LOADED",
+
+		"HAPI_RESULT_NO_LICENSE_FOUND",
+		"HAPI_RESULT_DISALLOWED_NC_LICENSE_FOUND",
+		"HAPI_RESULT_DISALLOWED_NC_ASSET_WITH_C_LICENSE",
+		"HAPI_RESULT_DISALLOWED_NC_ASSET_WITH_LC_LICENSE",
+		"HAPI_RESULT_DISALLOWED_LC_ASSET_WITH_C_LICENSE",
+		"HAPI_RESULT_DISALLOWED_HENGINEINDIE_W_3PARTY_PLUGIN",
+
+		"HAPI_RESULT_ASSET_INVALID",
+		"HAPI_RESULT_NODE_INVALID",
+
+		"HAPI_RESULT_USER_INTERRUPTED",
+
+		"HAPI_RESULT_INVALID_SESSION",
+		"Unknown HAPI Result",
+	};
+	if (res <= 10) {
+		return messages[res];
+	}
+	if (res <= 160) {
+		return messages[res / 10];
+	}
+	switch (res) {
+	case HAPI_RESULT_ASSET_INVALID:
+		return messages[17];
+	case HAPI_RESULT_NODE_INVALID:
+		return messages[18];
+	case HAPI_RESULT_USER_INTERRUPTED:
+		return messages[19];
+	case HAPI_RESULT_INVALID_SESSION:
+		return messages[20];
+	default:
+		return messages[21];
+	}
+}
+
+// Houdini
 
 typedef struct HoudiniRuntime {
 	HAPI_Session hsession;
@@ -86,15 +152,17 @@ static bool hruntime_init(HoudiniRuntime *hr) {
 		HAPI_CookOptions cookOptions;
 		cookOptions.maxVerticesPerPrimitive = 3; // TODO: switch back to -1 when it works with 3
 
+		printf("Creating Houdini Session\n");
+
 		res = HAPI_CreateInProcessSession(&global_hsession);
 		if (HAPI_RESULT_SUCCESS != res) {
-			ERR("Houdini error in HAPI_CreateInProcessSession: %u\n", res);
+			ERR("Houdini error in HAPI_CreateInProcessSession: %u (%s)\n", res, HAPI_ResultMessage(res));
 			return false;
 		}
 
 		res = HAPI_Initialize(&global_hsession, &cookOptions, false /* threaded cooking */, -1, NULL, NULL, NULL, NULL, NULL);
 		if (HAPI_RESULT_SUCCESS != res) {
-			ERR("Houdini error in HAPI_Initialize: %u\n", res);
+			ERR("Houdini error in HAPI_Initialize: %u (%s)\n", res, HAPI_ResultMessage(res));
 			return false;
 		}
 	}
@@ -128,14 +196,18 @@ static void hruntime_free(HoudiniRuntime *hr) {
 	global_hsession_users--;
 	if (0 == global_hsession_users) {
 		HAPI_Result res;
+
+		printf("Releasing Houdini Session\n");
+
 		res = HAPI_Cleanup(&hr->hsession);
 		if (HAPI_RESULT_SUCCESS != res) {
-			ERR("Houdini error in HAPI_Cleanup: %u\n", res);
+			ERR("Houdini error in HAPI_Cleanup: %u (%s)\n", res, HAPI_ResultMessage(res));
 		}
 	}
 	free_array(hr);
 }
 
+// private
 static void hruntime_close_library(HoudiniRuntime *hr) {
 	// TODO: Find a way to release the HAPI_AssetLibraryId
 
@@ -145,6 +217,7 @@ static void hruntime_close_library(HoudiniRuntime *hr) {
 	}
 }
 
+// private
 static bool hruntime_load_library(HoudiniRuntime *hr) {
 	// Load library
 	HAPI_Result res;
@@ -152,23 +225,21 @@ static bool hruntime_load_library(HoudiniRuntime *hr) {
 
 	res = HAPI_LoadAssetLibraryFromFile(&hr->hsession, hr->current_library_path, true, &hr->library);
 	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_LoadAssetLibraryFromFile: %u\n", res);
+		ERR("Houdini error in HAPI_LoadAssetLibraryFromFile: %u (%s)\n", res, HAPI_ResultMessage(res));
 		return false;
 	}
 
 	// Update asset count
 	res = HAPI_GetAvailableAssetCount(&hr->hsession, hr->library, &hr->asset_count);
 	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_GetAvailableAssetCount: %u\n", res);
+		ERR("Houdini error in HAPI_GetAvailableAssetCount: %u (%s)\n", res, HAPI_ResultMessage(res));
 		return false;
 	}
-
-	printf("Found %d assets in Houdini library:\n", hr->asset_count);
 
 	hr->asset_names_array = malloc_array(sizeof(HAPI_StringHandle), hr->asset_count, "houdini asset names");
 	res = HAPI_GetAvailableAssets(&hr->hsession, hr->library, hr->asset_names_array, hr->asset_count);
 	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_GetAvailableAssets: %u\n", res);
+		ERR("Houdini error in HAPI_GetAvailableAssets: %u (%s)\n", res, HAPI_ResultMessage(res));
 		return false;
 	}
 
@@ -192,27 +263,123 @@ static void hruntime_set_library(HoudiniRuntime *hr, const char *new_library_pat
 	}
 }
 
+/**
+ * /pre hruntime_set_library_path has been called
+ */
+static void hruntime_create_node(HoudiniRuntime *hr) {
+	HAPI_Result res;
+
+	char asset_name[MOD_HOUDINI_MAX_ASSET_NAME];
+	res = HAPI_GetString(&hr->hsession, hr->asset_names_array[hr->current_asset_index], asset_name, MOD_HOUDINI_MAX_ASSET_NAME);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetString: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return;
+	}
+
+	res = HAPI_CreateNode(&hr->hsession, -1, asset_name, NULL, false /* cook */, &hr->node_id);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_CreateNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return;
+	}
+}
+
+static void hruntime_destroy_node(HoudiniRuntime *hr) {
+	HAPI_Result res;
+	res = HAPI_DeleteNode(&hr->hsession, hr->node_id);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_CreateNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return;
+	}
+}
+
+/**
+ * /pre hruntime_create_node has been called
+ */
+static void hruntime_fetch_parameters(HoudiniRuntime *hr) {
+	HAPI_Result res;
+
+	if (NULL != hr->parm_infos_array) {
+		free_array(hr->parm_infos_array);
+		hr->parm_infos_array = NULL;
+		hr->parm_count = 0;
+	}
+
+	HAPI_NodeInfo node_info;
+	res = HAPI_GetNodeInfo(&hr->hsession, hr->node_id, &node_info);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetNodeInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return;
+	}
+
+	hr->parm_count = node_info.parmCount;
+
+	if (0 != node_info.parmCount) {
+		hr->parm_infos_array = malloc_array(sizeof(HAPI_ParmInfo), node_info.parmCount, "houdini parameter info");
+
+		res = HAPI_GetParameters(&hr->hsession, hr->node_id, hr->parm_infos_array, 0, node_info.parmCount);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_GetParameters: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return;
+		}
+	}
+}
+
+/**
+ * /pre hruntime_fetch_parameters has been called
+ */
+static void hruntime_get_parameter_name(HoudiniRuntime *hr, int idx, char *name) {
+	HAPI_Result res;
+	res = HAPI_GetString(&hr->hsession, hr->parm_infos_array[idx].nameSH, name, MOD_HOUDINI_MAX_PARAMETER_NAME);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetString: %u (%s)\n", res, HAPI_ResultMessage(res));
+	}
+}
+
+// Resources
+
+static char bundle_directory[MAX_BUNDLE_DIRECTORY];
+
+const char * get_hda_path() {
+	static char path[MAX_BUNDLE_DIRECTORY];
+	size_t len = strlen(bundle_directory);
+	strcpy(path, bundle_directory);
+	strncpy(path + len, "\\library.hda", MAX_BUNDLE_DIRECTORY - len); // TODO: forward slash, resource folder
+	return path;
+}
+
 // OFX
 
 typedef struct PluginRuntime {
+	OfxPlugin plugin;
+	int pluginIndex;
 	OfxHost *host;
 	OfxPropertySuiteV1 *propertySuite;
 	OfxParameterSuiteV1 *parameterSuite;
 	OfxMeshEffectSuiteV1 *meshEffectSuite;
+	HoudiniRuntime *houdiniRuntime;
 } PluginRuntime;
 
-PluginRuntime plugin0_runtime;
-PluginRuntime plugin1_runtime;
-
-static OfxStatus plugin0_load(PluginRuntime *runtime) {
+static OfxStatus plugin_load(PluginRuntime *runtime) {
 	OfxHost *h = runtime->host;
 	runtime->propertySuite = (OfxPropertySuiteV1*)h->fetchSuite(h->host, kOfxPropertySuite, 1);
 	runtime->parameterSuite = (OfxParameterSuiteV1*)h->fetchSuite(h->host, kOfxParameterSuite, 1);
 	runtime->meshEffectSuite = (OfxMeshEffectSuiteV1*)h->fetchSuite(h->host, kOfxMeshEffectSuite, 1);
+	runtime->houdiniRuntime = malloc_array(sizeof(HoudiniRuntime), 1, "houdini runtime");
+	if (false == hruntime_init(runtime->houdiniRuntime)) {
+		return kOfxStatFailed;
+	}
+
+	hruntime_set_library(runtime->houdiniRuntime, get_hda_path());
+	runtime->houdiniRuntime->current_asset_index = runtime->pluginIndex;
 	return kOfxStatOK;
 }
 
-static OfxStatus plugin0_describe(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
+static OfxStatus plugin_unload(PluginRuntime *runtime) {
+	hruntime_free(runtime->houdiniRuntime);
+	return kOfxStatOK;
+}
+
+static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
 	if (NULL == runtime->propertySuite || NULL == runtime->meshEffectSuite) {
 		return kOfxStatErrMissingHostFeature;
 	}
@@ -247,6 +414,35 @@ static OfxStatus plugin0_describe(const PluginRuntime *runtime, OfxMeshEffectHan
 	status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
 	printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
 
+	hruntime_create_node(runtime->houdiniRuntime);
+	hruntime_fetch_parameters(runtime->houdiniRuntime);
+	char name[MOD_HOUDINI_MAX_PARAMETER_NAME];
+	for (int i = 0 ; i < runtime->houdiniRuntime->parm_count ; ++i) {
+		hruntime_get_parameter_name(runtime->houdiniRuntime, i, name);
+
+		char *type;
+		switch(runtime->houdiniRuntime->parm_infos_array[i].type) {
+		case HAPI_PARMTYPE_FLOAT:
+			type = kOfxParamTypeDouble;
+			break;
+		case HAPI_PARMTYPE_INT:
+			type = kOfxParamTypeInteger;
+			break;
+		case HAPI_PARMTYPE_STRING:
+			type = kOfxParamTypeString;
+			break;
+		default:
+			type = NULL;
+		}
+
+		if (NULL != type && 0 == strcmp(kOfxParamTypeDouble, type) && 0 == strncmp(name, "hbridge_", 8)) {
+			printf("Defining parameter %s\n", name);
+			status = runtime->parameterSuite->paramDefine(parameters, type, name, NULL);
+			printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+		}
+	}
+	hruntime_destroy_node(runtime->houdiniRuntime);
+
 	status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeDouble, "width", NULL);
 	printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
@@ -259,10 +455,33 @@ static OfxStatus plugin0_describe(const PluginRuntime *runtime, OfxMeshEffectHan
 	return kOfxStatOK;
 }
 
-static OfxStatus plugin0_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
+static OfxStatus plugin_create_instance(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
+	HoudiniRuntime *hr = runtime->houdiniRuntime;
+	OfxPropertySetHandle propHandle;
+	hruntime_create_node(hr);
+	runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
+	runtime->propertySuite->propSetInt(propHandle, kOfxPropHoudiniNodeId, 0, hr->node_id);
+	return kOfxStatOK;
+}
+
+static OfxStatus plugin_destroy_instance(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
+	HoudiniRuntime *hr = runtime->houdiniRuntime;
+	OfxPropertySetHandle propHandle;
+	runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
+	runtime->propertySuite->propGetInt(propHandle, kOfxPropHoudiniNodeId, 0, &hr->node_id);
+	hruntime_destroy_node(hr);
+	return kOfxStatOK;
+}
+
+static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
 	OfxStatus status;
 	OfxMeshInputHandle input, output;
-	OfxPropertySetHandle propertySet;
+	OfxPropertySetHandle propertySet, effectProperties;
+	HoudiniRuntime *hr = runtime->houdiniRuntime;
+
+	// Set node id in houdini runtime to match this mesh effect instance
+	runtime->meshEffectSuite->getPropertySet(meshEffect, &effectProperties);
+	runtime->propertySuite->propGetInt(effectProperties, kOfxPropHoudiniNodeId, 0, &hr->node_id);
 
 	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kMainInput, &input, &propertySet);
 	printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
@@ -368,59 +587,90 @@ static OfxStatus plugin0_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEf
 	return kOfxStatOK;
 }
 
-static OfxStatus plugin0_mainEntry(const char *action,
-	const void *handle,
-	OfxPropertySetHandle inArgs,
-	OfxPropertySetHandle outArgs) {
+static PluginRuntime plugins[MAX_NUM_PLUGINS];
+
+static void setHost(int nth, OfxHost *host) {
+	plugins[nth].host = host;
+}
+
+static OfxStatus mainEntry(int nth,
+	                       const char *action,
+	                       const void *handle,
+	                       OfxPropertySetHandle inArgs,
+	                       OfxPropertySetHandle outArgs) {
 	if (0 == strcmp(action, kOfxActionLoad)) {
-		return plugin0_load(&plugin0_runtime);
+		return plugin_load(&plugins[nth]);
+	}
+	if (0 == strcmp(action, kOfxActionUnload)) {
+		return plugin_unload(&plugins[nth]);
 	}
 	if (0 == strcmp(action, kOfxActionDescribe)) {
-		return plugin0_describe(&plugin0_runtime, (OfxMeshEffectHandle)handle);
+		return plugin_describe(&plugins[nth], (OfxMeshEffectHandle)handle);
 	}
 	if (0 == strcmp(action, kOfxActionCreateInstance)) {
-		return kOfxStatOK;
+		return plugin_create_instance(&plugins[nth], (OfxMeshEffectHandle)handle);
 	}
 	if (0 == strcmp(action, kOfxActionDestroyInstance)) {
-		return kOfxStatOK;
+		return plugin_destroy_instance(&plugins[nth], (OfxMeshEffectHandle)handle);
 	}
 	if (0 == strcmp(action, kOfxMeshEffectActionCook)) {
-		return plugin0_cook(&plugin0_runtime, (OfxMeshEffectHandle)handle);
+		return plugin_cook(&plugins[nth], (OfxMeshEffectHandle)handle);
 	}
 	return kOfxStatReplyDefault;
 }
 
-static void plugin0_setHost(OfxHost *host) {
-	plugin0_runtime.host = host;
+// Closure mechanisme
+// to dynamically define OfxPlugin structs
+
+typedef void (OfxPluginSetHost)(OfxHost *host);
+
+static OfxPluginSetHost * setHost_pointers[MAX_NUM_PLUGINS];
+static OfxPluginEntryPoint * mainEntry_pointers[MAX_NUM_PLUGINS];
+static char pluginIdentifier_pointers[MAX_NUM_PLUGINS][MOD_HOUDINI_MAX_ASSET_NAME];
+
+#define MAKE_PLUGIN_CLOSURES(nth) \
+static void plugin ## nth ## _setHost(OfxHost *host) { \
+	setHost(nth, host); \
+} \
+static OfxStatus plugin ## nth ## _mainEntry(const char *action, \
+	                                         const void *handle, \
+	                                         OfxPropertySetHandle inArgs, \
+	                                         OfxPropertySetHandle outArgs) { \
+	return mainEntry(nth, action, handle, inArgs, outArgs); \
 }
 
-static OfxStatus plugin1_mainEntry(const char *action,
-	const void *handle,
-	OfxPropertySetHandle inArgs,
-	OfxPropertySetHandle outArgs) {
-	(void)action;
-	(void)handle;
-	(void)inArgs;
-	(void)outArgs;
-	return kOfxStatReplyDefault;
-}
+#define REGISTER_PLUGIN_CLOSURES(nth) \
+setHost_pointers[nth] = plugin ## nth ## _setHost; \
+mainEntry_pointers[nth] = plugin ## nth ## _mainEntry;
 
-static void plugin1_setHost(OfxHost *host) {
-	plugin1_runtime.host = host;
-}
-
-#define MAX_BUNDLE_DIRECTORY 1024
-static char bundle_directory[MAX_BUNDLE_DIRECTORY];
+MAKE_PLUGIN_CLOSURES(0)
+MAKE_PLUGIN_CLOSURES(1)
+MAKE_PLUGIN_CLOSURES(2)
+MAKE_PLUGIN_CLOSURES(3)
+MAKE_PLUGIN_CLOSURES(4)
+MAKE_PLUGIN_CLOSURES(5)
+MAKE_PLUGIN_CLOSURES(6)
+MAKE_PLUGIN_CLOSURES(7)
+MAKE_PLUGIN_CLOSURES(8)
+MAKE_PLUGIN_CLOSURES(9)
+// MAX_NUM_PLUGINS
 
 OfxExport void OfxSetBundleDirectory(const char *path) {
 	strncpy(bundle_directory, path, MAX_BUNDLE_DIRECTORY);
 }
 
 OfxExport int OfxGetNumberOfPlugins(void) {
-	char path[MAX_BUNDLE_DIRECTORY];
-	size_t len = strlen(bundle_directory);
-	strcpy(path, bundle_directory);
-	strncpy(path + len, "\\library.hda", MAX_BUNDLE_DIRECTORY - len); // TODO: forward slash, resource folder
+	REGISTER_PLUGIN_CLOSURES(0)
+	REGISTER_PLUGIN_CLOSURES(1)
+	REGISTER_PLUGIN_CLOSURES(2)
+	REGISTER_PLUGIN_CLOSURES(3)
+	REGISTER_PLUGIN_CLOSURES(4)
+	REGISTER_PLUGIN_CLOSURES(5)
+	REGISTER_PLUGIN_CLOSURES(6)
+	REGISTER_PLUGIN_CLOSURES(7)
+	REGISTER_PLUGIN_CLOSURES(8)
+	REGISTER_PLUGIN_CLOSURES(9)
+	// MAX_NUM_PLUGINS
 
 	int num_plugins;
 	HoudiniRuntime *hr = malloc_array(sizeof(HoudiniRuntime), 1, "houdini runtime");
@@ -428,32 +678,32 @@ OfxExport int OfxGetNumberOfPlugins(void) {
 		return 0;
 	}
 
-	hruntime_set_library(hr, path);
+	hruntime_set_library(hr, get_hda_path());
 	num_plugins = hr->asset_count;
+
+	for (int i = 0 ; i < num_plugins ; ++i) {
+		HAPI_Result res;
+		res = HAPI_GetString(&hr->hsession, hr->asset_names_array[i], pluginIdentifier_pointers[i], MOD_HOUDINI_MAX_ASSET_NAME);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_GetString: %u\n", res);
+		}
+
+		OfxPlugin *plugin = &plugins[i].plugin;
+		plugin->pluginApi = kOfxMeshEffectPluginApi;
+		plugin->apiVersion = kOfxMeshEffectPluginApiVersion;
+		plugin->pluginIdentifier = pluginIdentifier_pointers[i];
+		plugin->pluginVersionMajor = 1;
+		plugin->pluginVersionMinor = 0;
+		plugin->setHost = setHost_pointers[i];
+		plugin->mainEntry = mainEntry_pointers[i];
+
+		plugins[i].pluginIndex = i;
+	}
+
 	hruntime_free(hr);
-	return num_plugins;
+	return min(num_plugins, MAX_NUM_PLUGINS);
 }
 
 OfxExport OfxPlugin *OfxGetPlugin(int nth) {
-	static OfxPlugin plugins[] = {
-		{
-		/* pluginApi */          kOfxMeshEffectPluginApi,
-		/* apiVersion */         kOfxMeshEffectPluginApiVersion,
-		/* pluginIdentifier */   "MfxSamplePlugin0",
-		/* pluginVersionMajor */ 1,
-		/* pluginVersionMinor */ 0,
-		/* setHost */            plugin0_setHost,
-		/* mainEntry */          plugin0_mainEntry
-		},
-		{
-		/* pluginApi */          kOfxMeshEffectPluginApi,
-		/* apiVersion */         kOfxMeshEffectPluginApiVersion,
-		/* pluginIdentifier */   "MfxSamplePlugin1",
-		/* pluginVersionMajor */ 1,
-		/* pluginVersionMinor */ 0,
-		/* setHost */            plugin1_setHost,
-		/* mainEntry */          plugin1_mainEntry
-		}
-	};
-	return plugins + nth;
+	return &plugins[nth].plugin;
 }
