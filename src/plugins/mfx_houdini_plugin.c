@@ -31,9 +31,6 @@
 #include <windows.h>
 #endif // _WIN32
 
-#define kMainInput "MainInput"
-#define kMainOutput "MainOutput"
-
 #define MAX_NUM_PLUGINS 10
 #define MAX_BUNDLE_DIRECTORY 1024
 #define MOD_HOUDINI_MAX_ASSET_NAME 1024
@@ -97,6 +94,19 @@ const char * HAPI_ResultMessage(HAPI_Result res) {
 		return messages[20];
 	default:
 		return messages[21];
+	}
+}
+
+const char * houdini_to_ofx_type(HAPI_ParmType houdini_type) {
+	switch (houdini_type) {
+	case HAPI_PARMTYPE_FLOAT:
+		return kOfxParamTypeDouble;
+	case HAPI_PARMTYPE_INT:
+		return kOfxParamTypeInteger;
+	case HAPI_PARMTYPE_STRING:
+		return kOfxParamTypeString;
+	default:
+		return NULL;
 	}
 }
 
@@ -175,6 +185,7 @@ static bool hruntime_init(HoudiniRuntime *hr) {
 	hr->asset_names_array = NULL;
 	hr->asset_count = 0;
 	hr->parm_infos_array = NULL;
+	hr->sop_array = NULL;
 	hr->parm_count = 0;
 	hr->error_message = NULL;
 
@@ -188,7 +199,9 @@ static void hruntime_free(HoudiniRuntime *hr) {
 	if (NULL != hr->parm_infos_array) {
 		free_array(hr->parm_infos_array);
 	}
-
+	if (NULL != hr->sop_array) {
+		free_array(hr->sop_array);
+	}
 	if (NULL != hr->error_message) {
 		free_array(hr->error_message);
 	}
@@ -327,11 +340,243 @@ static void hruntime_fetch_parameters(HoudiniRuntime *hr) {
 /**
  * /pre hruntime_fetch_parameters has been called
  */
-static void hruntime_get_parameter_name(HoudiniRuntime *hr, int idx, char *name) {
+static void hruntime_get_parameter_name(HoudiniRuntime *hr, int parm_index, char *name) {
 	HAPI_Result res;
-	res = HAPI_GetString(&hr->hsession, hr->parm_infos_array[idx].nameSH, name, MOD_HOUDINI_MAX_PARAMETER_NAME);
+	res = HAPI_GetString(&hr->hsession, hr->parm_infos_array[parm_index].nameSH, name, MOD_HOUDINI_MAX_PARAMETER_NAME);
 	if (HAPI_RESULT_SUCCESS != res) {
 		ERR("Houdini error in HAPI_GetString: %u (%s)\n", res, HAPI_ResultMessage(res));
+	}
+}
+
+static void hruntime_set_float_parm(HoudiniRuntime *hr, int parm_index, float value) {
+	HAPI_Result res;
+
+	res = HAPI_SetParmFloatValues(&hr->hsession, hr->node_id, &value, hr->parm_infos_array[parm_index].floatValuesIndex, 1);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_SetParmFloatValues: %u (%s)\n", res, HAPI_ResultMessage(res));
+	}
+}
+
+static bool hruntime_cook_asset(HoudiniRuntime *hr) {
+	HAPI_Result res;
+	int status;
+	HAPI_State cooking_state;
+
+	printf("Houdini: cooking root node...\n");
+	res = HAPI_CookNode(&hr->hsession, hr->node_id, NULL);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_CookNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+
+	res = HAPI_GetStatus(&hr->hsession, HAPI_STATUS_COOK_STATE, &status);
+	cooking_state = (HAPI_State)status;
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetStatus: %u (%s)\n", res, HAPI_ResultMessage(res));
+		cooking_state = HAPI_STATE_LOADING;
+	}
+
+	printf("Houdini cooking state: %u\n", cooking_state);
+	bool is_ready = cooking_state <= HAPI_STATE_MAX_READY_STATE;
+
+	if (is_ready) {
+		if (cooking_state == HAPI_STATE_READY_WITH_FATAL_ERRORS) {
+			printf("Warning: Houdini Cooking terminated with fatal errors.\n");
+		}
+		else if (cooking_state == HAPI_STATE_READY_WITH_COOK_ERRORS) {
+			printf("Warning: Houdini Cooking terminated with cook errors.\n");
+		}
+	}
+
+	if (!is_ready) {
+		printf("Cooking not finished, skipping Houdini modifier.\n");
+		return false;
+	}
+
+	return true;
+}
+
+static bool hruntime_fetch_sops(HoudiniRuntime *hr) {
+	HAPI_Result res;
+	HAPI_NodeInfo node_info;
+
+	res = HAPI_GetNodeInfo(&hr->hsession, hr->node_id, &node_info);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetNodeInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+
+	printf("Node type: %d\n", node_info.type);
+
+	if (NULL != hr->sop_array) {
+		free_array(hr->sop_array);
+		hr->sop_array = NULL;
+	}
+
+	switch (node_info.type) {
+	case HAPI_NODETYPE_SOP:
+	{
+		hr->sop_count = 1;
+		hr->sop_array = malloc_array(sizeof(HAPI_NodeId), hr->sop_count, "houdini cooked SOPs");
+		hr->sop_array[0] = hr->node_id;
+		return true;
+	}
+
+	case HAPI_NODETYPE_OBJ:
+	{
+		res = HAPI_ComposeChildNodeList(&hr->hsession, hr->node_id, HAPI_NODETYPE_SOP, HAPI_NODEFLAGS_DISPLAY, true, &hr->sop_count);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_ComposeChildNodeList: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return false;
+		}
+
+		hr->sop_array = malloc_array(sizeof(HAPI_NodeId), hr->sop_count, "houdini cooked SOPs");
+
+		res = HAPI_GetComposedChildNodeList(&hr->hsession, hr->node_id, hr->sop_array, hr->sop_count);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_GetComposedChildNodeList: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return false;
+		}
+
+		printf("Asset has %d Display SOP(s).\n", hr->sop_count);
+		return true;
+	}
+
+	default:
+		printf("Houdini modifier for Blender only supports SOP and OBJ digital asset, but this asset has type %d.\n", node_info.type);
+		return false;
+	}
+}
+
+static void hruntime_consolidate_geo_counts(HoudiniRuntime *hr, int *point_count_ptr, int *vertex_count_ptr, int *face_count_ptr) {
+	for (int sid = 0; sid < hr->sop_count; ++sid) {
+		HAPI_Result res;
+		HAPI_GeoInfo geo_info;
+		HAPI_NodeId node_id = hr->sop_array[sid];
+
+		printf("Handling SOP #%d.\n", sid);
+
+		res = HAPI_GetGeoInfo(&hr->hsession, node_id, &geo_info);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("HAPI_GetGeoInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+			continue;
+		}
+
+		if (geo_info.partCount == 0) {
+			res = HAPI_CookNode(&hr->hsession, node_id, NULL);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_CookNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+			}
+
+			res = HAPI_GetGeoInfo(&hr->hsession, node_id, &geo_info);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_GetGeoInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+				continue;
+			}
+		}
+
+		char name[256];
+		HAPI_GetString(&hr->hsession, geo_info.nameSH, name, 256);
+		printf("Geo '%s' has %d parts and has type %d.\n", name, geo_info.partCount, geo_info.type);
+
+		for (int i = 0; i < geo_info.partCount; ++i) {
+			HAPI_PartInfo part_info;
+			HAPI_PartId part_id = (HAPI_PartId)i;
+			res = HAPI_GetPartInfo(&hr->hsession, node_id, part_id, &part_info);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_GetPartInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+				continue;
+			}
+
+			printf("Part #%d: type %d, %d points, %d vertices, %d faces.\n", i, part_info.type, part_info.pointCount, part_info.vertexCount, part_info.faceCount);
+
+			if (part_info.type != HAPI_PARTTYPE_MESH) {
+				printf("Ignoring non-mesh part.\n");
+				continue;
+			}
+
+			*point_count_ptr += part_info.pointCount;
+			*vertex_count_ptr += part_info.vertexCount;
+			*face_count_ptr += part_info.faceCount;
+		}
+	}
+}
+
+static void hruntime_fill_mesh(HoudiniRuntime *hr,
+	                           float *point_data, int point_count,
+	                           int *vertex_data, int vertex_count,
+	                           int *face_data, int face_count) {
+	int current_point = 0, current_vertex = 0, current_face = 0;
+
+	for (int sid = 0; sid < hr->sop_count; ++sid) {
+		HAPI_Result res;
+		HAPI_GeoInfo geo_info;
+		HAPI_NodeId node_id = hr->sop_array[sid];
+
+		printf("Loading SOP #%d.\n", sid);
+
+		res = HAPI_GetGeoInfo(&hr->hsession, node_id, &geo_info);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("HAPI_GetGeoInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+			continue;
+		}
+
+		for (int i = 0; i < geo_info.partCount; ++i) {
+			HAPI_PartInfo part_info;
+			HAPI_PartId part_id = (HAPI_PartId)i;
+
+			res = HAPI_GetPartInfo(&hr->hsession, node_id, part_id, &part_info);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_GetPartInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+				continue;
+			}
+
+			printf("Part #%d: type %d, %d points, %d vertices, %d faces.\n", i, part_info.type, part_info.pointCount, part_info.vertexCount, part_info.faceCount);
+
+			if (part_info.type != HAPI_PARTTYPE_MESH) {
+				printf("Ignoring non-mesh part.\n");
+				continue;
+			}
+
+			HAPI_AttributeInfo pos_attr_info;
+			res = HAPI_GetAttributeInfo(&hr->hsession, node_id, part_id, "P", HAPI_ATTROWNER_POINT, &pos_attr_info);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_GetAttributeInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+				continue;
+			}
+
+			// Get Point data
+			res = HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, "P", &pos_attr_info, -1, point_data + 3 * current_point, 0, part_info.pointCount);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_GetAttributeFloatData: %u (%s)\n", res, HAPI_ResultMessage(res));
+				continue;
+			}
+
+			// Get Vertex Data
+			int *part_vertex_data = malloc_array(sizeof(int), part_info.vertexCount, "houdini vertex list");
+			res = HAPI_GetVertexList(&hr->hsession, node_id, part_id, part_vertex_data, 0, part_info.vertexCount);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_GetVertexList: %u (%s)\n", res, HAPI_ResultMessage(res));
+				free_array(part_vertex_data);
+				continue;
+			}
+			// TODO: can be vectorized
+			for (int vid = 0 ; vid < part_info.vertexCount ; ++vid) {
+				vertex_data[current_vertex + vid] = current_point + part_vertex_data[vid];
+			}
+			free_array(part_vertex_data);
+
+			// Get face data
+			res = HAPI_GetFaceCounts(&hr->hsession, node_id, part_id, face_data + current_face, 0, part_info.faceCount);
+			if (HAPI_RESULT_SUCCESS != res) {
+				ERR("HAPI_GetFaceCounts: %u (%s)\n", res, HAPI_ResultMessage(res));
+				continue;
+			}
+
+			current_point += part_info.pointCount;
+			current_vertex += part_info.vertexCount;
+			current_face += part_info.faceCount;
+		}
 	}
 }
 
@@ -395,14 +640,14 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 
 	// Shall move into "describe in context" when it will exist
 	OfxPropertySetHandle inputProperties;
-	status = runtime->meshEffectSuite->inputDefine(meshEffect, kMainInput, &inputProperties);
+	status = runtime->meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainInput, &inputProperties);
 	printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
 	status = runtime->propertySuite->propSetString(inputProperties, kOfxPropLabel, 0, "Main Input");
 	printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
 
 	OfxPropertySetHandle outputProperties;
-	status = runtime->meshEffectSuite->inputDefine(meshEffect, kMainOutput, &outputProperties); // yes, output are also "inputs", I should change this name in the API
+	status = runtime->meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainOutput, &outputProperties); // yes, output are also "inputs", I should change this name in the API
 	printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 
 	status = runtime->propertySuite->propSetString(outputProperties, kOfxPropLabel, 0, "Main Output");
@@ -420,20 +665,7 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 	for (int i = 0 ; i < runtime->houdiniRuntime->parm_count ; ++i) {
 		hruntime_get_parameter_name(runtime->houdiniRuntime, i, name);
 
-		char *type;
-		switch(runtime->houdiniRuntime->parm_infos_array[i].type) {
-		case HAPI_PARMTYPE_FLOAT:
-			type = kOfxParamTypeDouble;
-			break;
-		case HAPI_PARMTYPE_INT:
-			type = kOfxParamTypeInteger;
-			break;
-		case HAPI_PARMTYPE_STRING:
-			type = kOfxParamTypeString;
-			break;
-		default:
-			type = NULL;
-		}
+		const char *type = houdini_to_ofx_type(runtime->houdiniRuntime->parm_infos_array[i].type);
 
 		if (NULL != type && 0 == strcmp(kOfxParamTypeDouble, type) && 0 == strncmp(name, "hbridge_", 8)) {
 			printf("Defining parameter %s\n", name);
@@ -443,15 +675,6 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 	}
 	hruntime_destroy_node(runtime->houdiniRuntime);
 
-	status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeDouble, "width", NULL);
-	printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
-
-	status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeInteger, "steps", NULL);
-	printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
-
-	status = runtime->parameterSuite->paramDefine(parameters, kOfxParamTypeString, "path", NULL);
-	printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
-
 	return kOfxStatOK;
 }
 
@@ -459,6 +682,7 @@ static OfxStatus plugin_create_instance(const PluginRuntime *runtime, OfxMeshEff
 	HoudiniRuntime *hr = runtime->houdiniRuntime;
 	OfxPropertySetHandle propHandle;
 	hruntime_create_node(hr);
+	hruntime_fetch_parameters(runtime->houdiniRuntime);
 	runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
 	runtime->propertySuite->propSetInt(propHandle, kOfxPropHoudiniNodeId, 0, hr->node_id);
 	return kOfxStatOK;
@@ -473,6 +697,10 @@ static OfxStatus plugin_destroy_instance(const PluginRuntime *runtime, OfxMeshEf
 	return kOfxStatOK;
 }
 
+static void log_status() {
+
+}
+
 static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
 	OfxStatus status;
 	OfxMeshInputHandle input, output;
@@ -483,13 +711,13 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	runtime->meshEffectSuite->getPropertySet(meshEffect, &effectProperties);
 	runtime->propertySuite->propGetInt(effectProperties, kOfxPropHoudiniNodeId, 0, &hr->node_id);
 
-	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kMainInput, &input, &propertySet);
+	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kOfxMeshMainInput, &input, &propertySet);
 	printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
 	if (status != kOfxStatOK) {
 		return kOfxStatErrUnknown;
 	}
 
-	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kMainOutput, &output, &propertySet);
+	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kOfxMeshMainOutput, &output, &propertySet);
 	printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
 	if (status != kOfxStatOK) {
 		return kOfxStatErrUnknown;
@@ -521,27 +749,39 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
 	printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
 
-	status = runtime->parameterSuite->paramGetHandle(parameters, "width", &param, NULL);
-	printf("Suite method 'paramGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
+	char name[MOD_HOUDINI_MAX_PARAMETER_NAME];
+	for (int i = 0 ; i < runtime->houdiniRuntime->parm_count ; ++i) {
+		hruntime_get_parameter_name(runtime->houdiniRuntime, i, name);
 
-	double width;
-	status = runtime->parameterSuite->paramGetValue(param, &width);
-	printf("Suite method 'paramGetValue' returned status %d (%s)\n", status, getOfxStateName(status));
+		const char *type = houdini_to_ofx_type(runtime->houdiniRuntime->parm_infos_array[i].type);
 
-	printf("-- width parameter set to: %f\n", width);
+		if (NULL != type && 0 == strcmp(kOfxParamTypeDouble, type) && 0 == strncmp(name, "hbridge_", 8)) {
+			double value;
+			runtime->parameterSuite->paramGetHandle(parameters, name, &param, NULL);
+			runtime->parameterSuite->paramGetValue(param, &value);
+			hruntime_set_float_parm(runtime->houdiniRuntime, i, value);
+		}
+	}
 
-	// TODO: core cook
+	// Core cook
+
+	if (false == hruntime_cook_asset(runtime->houdiniRuntime)) {
+		return kOfxStatErrUnknown;
+	}
+	if (false == hruntime_fetch_sops(runtime->houdiniRuntime)) {
+		return kOfxStatErrUnknown;
+	}
 
 	OfxPropertySetHandle output_mesh;
 	status = runtime->meshEffectSuite->inputGetMesh(output, time, &output_mesh);
 	printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
+	// Consolidate geo counts
 	int output_point_count = 0, output_vertex_count = 0, output_face_count = 0;
-
-	// TODO: Consolidate geo counts
-	output_point_count = 4;
-	output_vertex_count = 4;
-	output_face_count = 1;
+	hruntime_consolidate_geo_counts(runtime->houdiniRuntime,
+		                            &output_point_count,
+		                            &output_vertex_count,
+		                            &output_face_count);
 
 	printf("DEBUG: Allocating output mesh data: %d points, %d vertices, %d faces\n", output_point_count, output_vertex_count, output_face_count);
 
@@ -560,26 +800,11 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropFaceData, 0, (void**)&output_faces);
 	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
-	// TODO: Fill data
-	output_points[0 * 3 + 0] = -1.0f;
-	output_points[0 * 3 + 1] = -width;
-	output_points[0 * 3 + 2] = 0.0f;
-
-	output_points[1 * 3 + 0] = 1.0f;
-	output_points[1 * 3 + 1] = -width;
-	output_points[1 * 3 + 2] = 0.0f;
-
-	output_points[2 * 3 + 0] = 1.0f;
-	output_points[2 * 3 + 1] = width;
-	output_points[2 * 3 + 2] = 0.0f;
-
-	output_points[3 * 3 + 0] = -1.0f;
-	output_points[3 * 3 + 1] = width;
-	output_points[3 * 3 + 2] = 0.0f;
-
-	for (int i = 0; i < 4; ++i) output_vertices[i] = i;
-
-	output_faces[0] = 4;
+	// Fill data
+	hruntime_fill_mesh(runtime->houdiniRuntime,
+		               output_points, output_point_count,
+		               output_vertices, output_vertex_count,
+		               output_faces, output_face_count);
 
 	status = runtime->meshEffectSuite->inputReleaseMesh(output_mesh);
 	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
