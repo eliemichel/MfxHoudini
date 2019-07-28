@@ -116,6 +116,8 @@ typedef struct HoudiniRuntime {
 	HAPI_Session hsession;
 	HAPI_AssetLibraryId library;
 	HAPI_NodeId node_id;
+	HAPI_NodeId input_node_id;
+	HAPI_NodeId input_sop_id;
 	HAPI_StringHandle *asset_names_array;
 	char current_library_path[1024];
 	int current_asset_index;
@@ -160,7 +162,7 @@ static bool hruntime_init(HoudiniRuntime *hr) {
 
 	if (0 == global_hsession_users) {
 		HAPI_CookOptions cookOptions;
-		cookOptions.maxVerticesPerPrimitive = 3; // TODO: switch back to -1 when it works with 3
+		cookOptions.maxVerticesPerPrimitive = -1; // TODO: switch back to -1 when it works with 3
 
 		printf("Creating Houdini Session\n");
 
@@ -188,6 +190,8 @@ static bool hruntime_init(HoudiniRuntime *hr) {
 	hr->sop_array = NULL;
 	hr->parm_count = 0;
 	hr->error_message = NULL;
+	hr->input_node_id = -1;
+	hr->input_sop_id = -1;
 
 	return true;
 }
@@ -294,14 +298,69 @@ static void hruntime_create_node(HoudiniRuntime *hr) {
 		ERR("Houdini error in HAPI_CreateNode: %u (%s)\n", res, HAPI_ResultMessage(res));
 		return;
 	}
+
+	HAPI_NodeInfo node_info;
+	res = HAPI_GetNodeInfo(&hr->hsession, hr->node_id, &node_info);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_GetNodeInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return;
+	}
+
+	hr->input_node_id = -1;
+	hr->input_sop_id = -1;
+
+	// If node is a SOP, create dontext OBJ and input node
+	if (HAPI_NODETYPE_SOP == node_info.type) {
+		res = HAPI_DeleteNode(&hr->hsession, hr->node_id);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_DeleteNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return;
+		}
+
+		res = HAPI_CreateInputNode(&hr->hsession, &hr->input_node_id, NULL);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_CreateInputNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return;
+		}
+
+		HAPI_GeoInfo geo_info;
+		HAPI_GetDisplayGeoInfo(&hr->hsession, hr->input_node_id, &geo_info);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_GetDisplayGeoInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return;
+		}
+		hr->input_sop_id = geo_info.nodeId;
+		
+		//res = HAPI_CreateNode(&hr->hsession, hr->input_node_id, asset_name, NULL, false /* cook */, &hr->node_id);
+		res = HAPI_CreateNode(&hr->hsession, -1, asset_name, NULL, false /* cook */, &hr->node_id);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_CreateNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return;
+		}
+
+		res = HAPI_ConnectNodeInput(&hr->hsession, hr->node_id, 0, hr->input_sop_id, 0);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_ConnectNodeInput: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return;
+		}
+	}
 }
 
 static void hruntime_destroy_node(HoudiniRuntime *hr) {
 	HAPI_Result res;
+
 	res = HAPI_DeleteNode(&hr->hsession, hr->node_id);
 	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_CreateNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+		ERR("Houdini error in HAPI_DeleteNode: %u (%s)\n", res, HAPI_ResultMessage(res));
 		return;
+	}
+
+	if (-1 != hr->input_node_id) {
+		res = HAPI_DeleteNode(&hr->hsession, hr->node_id);
+		if (HAPI_RESULT_SUCCESS != res) {
+			ERR("Houdini error in HAPI_DeleteNode: %u (%s)\n", res, HAPI_ResultMessage(res));
+			return;
+		}
 	}
 }
 
@@ -580,6 +639,66 @@ static void hruntime_fill_mesh(HoudiniRuntime *hr,
 	}
 }
 
+static bool hruntime_feed_input_data(HoudiniRuntime *hr,
+	                                 float *point_data, int point_count,
+	                                 int *vertex_data, int vertex_count,
+	                                 int *face_data, int face_count) {
+	HAPI_Result res;
+
+	if (hr->input_sop_id == -1) {
+		return true;
+	}
+
+	HAPI_PartInfo part_info = HAPI_PartInfo_Create();
+	part_info.pointCount = point_count;
+	part_info.vertexCount = vertex_count;
+	part_info.faceCount = face_count;
+	part_info.isInstanced = false;
+	res = HAPI_SetPartInfo(&hr->hsession, hr->input_sop_id, 0, &part_info);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_SetPartInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+
+	HAPI_AttributeInfo attrib_info = HAPI_AttributeInfo_Create();
+	attrib_info.exists = true;
+	attrib_info.owner = HAPI_ATTROWNER_POINT;
+	attrib_info.count = point_count;
+	attrib_info.tupleSize = 3;
+	attrib_info.storage = HAPI_STORAGETYPE_FLOAT;
+	attrib_info.typeInfo = HAPI_ATTRIBUTE_TYPE_POINT;
+	res = HAPI_AddAttribute(&hr->hsession, hr->input_sop_id, 0, HAPI_ATTRIB_POSITION, &attrib_info);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_AddAttribute: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+	res = HAPI_SetAttributeFloatData(&hr->hsession, hr->input_sop_id, 0, HAPI_ATTRIB_POSITION, &attrib_info, point_data, 0, point_count);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_SetAttributeFloatData: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+
+	res = HAPI_SetVertexList(&hr->hsession, hr->input_sop_id, 0, vertex_data, 0, vertex_count);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_SetVertexList: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+
+	res = HAPI_SetFaceCounts(&hr->hsession, hr->input_sop_id, 0, face_data, 0, face_count);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_SetFaceCounts: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+
+	res = HAPI_CommitGeo(&hr->hsession, hr->input_sop_id);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_CommitGeo: %u (%s)\n", res, HAPI_ResultMessage(res));
+		return false;
+	}
+
+	return true;
+}
+
 // Resources
 
 static char bundle_directory[MAX_BUNDLE_DIRECTORY];
@@ -728,18 +847,36 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	status = runtime->meshEffectSuite->inputGetMesh(input, time, &input_mesh);
 	printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
-	int input_point_count;
+	// Get input data
+	int input_point_count = 0, input_vertex_count = 0, input_face_count = 0;
 	status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropPointCount, 0, &input_point_count);
+	printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
+
+	status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropVertexCount, 0, &input_vertex_count);
+	printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
+
+	status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropFaceCount, 0, &input_face_count);
 	printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
 
 	float *input_points;
 	status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropPointData, 0, (void**)&input_points);
 	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
-	printf("DEBUG: Found %d in input mesh\n", input_point_count);
+	int *input_vertices;
+	status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropVertexData, 0, (void**)&input_vertices);
+	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
-	// TODO: store input data
+	int *input_faces;
+	status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropFaceData, 0, (void**)&input_faces);
+	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
 
+	printf("DEBUG: Found %d points in input mesh\n", input_point_count);
+
+	hruntime_feed_input_data(runtime->houdiniRuntime,
+		                     input_points, input_point_count,
+		                     input_vertices, input_vertex_count,
+		                     input_faces, input_face_count);
+	
 	status = runtime->meshEffectSuite->inputReleaseMesh(input_mesh);
 	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
