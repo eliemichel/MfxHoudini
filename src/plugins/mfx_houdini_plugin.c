@@ -97,12 +97,39 @@ const char * HAPI_ResultMessage(HAPI_Result res) {
 	}
 }
 
-const char * houdini_to_ofx_type(HAPI_ParmType houdini_type) {
+const char * houdini_to_ofx_type(HAPI_ParmType houdini_type, int size) {
 	switch (houdini_type) {
 	case HAPI_PARMTYPE_FLOAT:
-		return kOfxParamTypeDouble;
+		switch (size) {
+		case 1:
+			return kOfxParamTypeDouble;
+		case 2:
+			return kOfxParamTypeDouble2D;
+		case 3:
+			return kOfxParamTypeDouble3D;
+		default:
+			return NULL;
+		}
 	case HAPI_PARMTYPE_INT:
-		return kOfxParamTypeInteger;
+		switch (size) {
+		case 1:
+			return kOfxParamTypeInteger;
+		case 2:
+			return kOfxParamTypeInteger2D;
+		case 3:
+			return kOfxParamTypeInteger3D;
+		default:
+			return NULL;
+		}
+	case HAPI_PARMTYPE_COLOR:
+		switch (size) {
+		case 3:
+			return kOfxParamTypeRGB;
+		case 4:
+			return kOfxParamTypeRGBA;
+		default:
+			return NULL;
+		}
 	case HAPI_PARMTYPE_STRING:
 		return kOfxParamTypeString;
 	default:
@@ -162,7 +189,7 @@ static bool hruntime_init(HoudiniRuntime *hr) {
 
 	if (0 == global_hsession_users) {
 		HAPI_CookOptions cookOptions;
-		cookOptions.maxVerticesPerPrimitive = -1; // TODO: switch back to -1 when it works with 3
+		cookOptions.maxVerticesPerPrimitive = -1;
 
 		printf("Creating Houdini Session\n");
 
@@ -309,7 +336,7 @@ static void hruntime_create_node(HoudiniRuntime *hr) {
 	hr->input_node_id = -1;
 	hr->input_sop_id = -1;
 
-	// If node is a SOP, create dontext OBJ and input node
+	// If node is a SOP, create context OBJ and input node
 	if (HAPI_NODETYPE_SOP == node_info.type) {
 		res = HAPI_DeleteNode(&hr->hsession, hr->node_id);
 		if (HAPI_RESULT_SUCCESS != res) {
@@ -407,12 +434,19 @@ static void hruntime_get_parameter_name(HoudiniRuntime *hr, int parm_index, char
 	}
 }
 
-static void hruntime_set_float_parm(HoudiniRuntime *hr, int parm_index, float value) {
+static void hruntime_set_float_parm(HoudiniRuntime *hr, int parm_index, const float *values, int length) {
 	HAPI_Result res;
-
-	res = HAPI_SetParmFloatValues(&hr->hsession, hr->node_id, &value, hr->parm_infos_array[parm_index].floatValuesIndex, 1);
+	res = HAPI_SetParmFloatValues(&hr->hsession, hr->node_id, values, hr->parm_infos_array[parm_index].floatValuesIndex, length);
 	if (HAPI_RESULT_SUCCESS != res) {
 		ERR("Houdini error in HAPI_SetParmFloatValues: %u (%s)\n", res, HAPI_ResultMessage(res));
+	}
+}
+
+static void hruntime_set_int_parm(HoudiniRuntime *hr, int parm_index, const int *values, int length) {
+	HAPI_Result res;
+	res = HAPI_SetParmIntValues(&hr->hsession, hr->node_id, values, hr->parm_infos_array[parm_index].intValuesIndex, length);
+	if (HAPI_RESULT_SUCCESS != res) {
+		ERR("Houdini error in HAPI_SetParmIntValues: %u (%s)\n", res, HAPI_ResultMessage(res));
 	}
 }
 
@@ -784,9 +818,10 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 	for (int i = 0 ; i < runtime->houdiniRuntime->parm_count ; ++i) {
 		hruntime_get_parameter_name(runtime->houdiniRuntime, i, name);
 
-		const char *type = houdini_to_ofx_type(runtime->houdiniRuntime->parm_infos_array[i].type);
+		HAPI_ParmInfo info = runtime->houdiniRuntime->parm_infos_array[i];
+		const char *type = houdini_to_ofx_type(info.type, info.size);
 
-		if (NULL != type && 0 == strcmp(kOfxParamTypeDouble, type) && 0 == strncmp(name, "hbridge_", 8)) {
+		if (NULL != type && 0 == strncmp(name, "mfx_", 4)) {
 			printf("Defining parameter %s\n", name);
 			status = runtime->parameterSuite->paramDefine(parameters, type, name, NULL);
 			printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
@@ -818,6 +853,78 @@ static OfxStatus plugin_destroy_instance(const PluginRuntime *runtime, OfxMeshEf
 
 static void log_status() {
 
+}
+
+static void copy_d4_to_f4(float float_values[4], double double_values[4]) {
+	float_values[0] = (float)double_values[0];
+	float_values[1] = (float)double_values[1];
+	float_values[2] = (float)double_values[2];
+	float_values[3] = (float)double_values[3];
+}
+
+static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAPI_ParmType type, int size, OfxParamHandle param) {
+	
+	double double_values[4];
+	float float_values[4];
+	int int_values[4];
+	switch (type) {
+	case HAPI_PARMTYPE_INT:
+		switch (size) {
+		case 0:
+			size = 1;
+		case 1:
+			runtime->parameterSuite->paramGetValue(param, int_values+0);
+			break;
+		case 2:
+			runtime->parameterSuite->paramGetValue(param, int_values+0, int_values+1);
+			break;
+		case 3:
+			runtime->parameterSuite->paramGetValue(param, int_values+0, int_values+1, int_values+2);
+			break;
+		default:
+			return false;
+		}
+		hruntime_set_int_parm(runtime->houdiniRuntime, parm_index, int_values, size);
+		break;
+	case HAPI_PARMTYPE_FLOAT:
+		switch (size) {
+		case 0:
+			size = 1;
+		case 1:
+			runtime->parameterSuite->paramGetValue(param, double_values+0);
+			break;
+		case 2:
+			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1);
+			break;
+		case 3:
+			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2);
+			break;
+		default:
+			return false;
+		}
+		copy_d4_to_f4(float_values, double_values);
+		hruntime_set_float_parm(runtime->houdiniRuntime, parm_index, float_values, size);
+		break;
+	case HAPI_PARMTYPE_COLOR:
+		switch (size) {
+		case 3:
+			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2);
+			break;
+		case 4:
+			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2, double_values+3);
+			break;
+		default:
+			return false;
+		}
+		copy_d4_to_f4(float_values, double_values);
+		hruntime_set_float_parm(runtime->houdiniRuntime, parm_index, float_values, size);
+		break;
+	case HAPI_PARMTYPE_STRING:
+		return false; // TODO
+	default:
+		return false;
+	}
+	return true;
 }
 
 static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
@@ -890,13 +997,14 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	for (int i = 0 ; i < runtime->houdiniRuntime->parm_count ; ++i) {
 		hruntime_get_parameter_name(runtime->houdiniRuntime, i, name);
 
-		const char *type = houdini_to_ofx_type(runtime->houdiniRuntime->parm_infos_array[i].type);
+		HAPI_ParmInfo info = runtime->houdiniRuntime->parm_infos_array[i];
+		const char *type = houdini_to_ofx_type(info.type, info.size);
 
-		if (NULL != type && 0 == strcmp(kOfxParamTypeDouble, type) && 0 == strncmp(name, "hbridge_", 8)) {
-			double value;
+		if (NULL != type && 0 == strncmp(name, "mfx_", 4)) {
 			runtime->parameterSuite->paramGetHandle(parameters, name, &param, NULL);
-			runtime->parameterSuite->paramGetValue(param, &value);
-			hruntime_set_float_parm(runtime->houdiniRuntime, i, value);
+			if (false == plugin_get_parm_from_ofx(runtime, i, info.type, info.size, param)) {
+				printf("Could not get value from ofx for parm #%d (%s) -- type = %d, size = %d\n", i, name, info.type, info.size);
+			}
 		}
 	}
 
