@@ -57,6 +57,11 @@ typedef struct Attribute {
 enum AttributeType mfxAttrAsEnum(const char *attr_type);
 
 /**
+ * Return the byte size of an attribute type
+ */
+size_t attributeTypeByteSize(enum AttributeType type);
+
+/**
  * Get attribute info from low level open mesh effect API and store it in a struct Attribute
  */
 OfxStatus getAttribute(PluginRuntime *runtime, OfxMeshHandle mesh, const char *attachment, const char *name, Attribute *attr);

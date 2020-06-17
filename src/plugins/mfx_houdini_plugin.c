@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <assert.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -43,6 +44,22 @@
 if (kOfxStatOK != status) {\
 printf("Suite method call '" #op "' returned status %d (%s)\n", status, getOfxStateName(status)); \
 }
+#define MFX_CHECK2(op) status = op; \
+if (kOfxStatOK != status) {\
+printf("Suite method call '" #op "' returned status %d (%s)\n", status, getOfxStateName(status)); \
+}
+
+#define H_CHECK(op) res = op; \
+if (HAPI_RESULT_SUCCESS != res) { \
+	ERR("Houdini error during call '" #op "': %u (%s)\n", res, HAPI_ResultMessage(res)); \
+	return false; \
+}
+
+#define H_CHECK_OR(op) res = op; \
+if (HAPI_RESULT_SUCCESS != res) { \
+	ERR("Houdini error during call '" #op "': %u (%s)\n", res, HAPI_ResultMessage(res)); \
+} \
+if (HAPI_RESULT_SUCCESS != res) \
 
 // Utils
 
@@ -602,10 +619,17 @@ static void hruntime_consolidate_geo_counts(HoudiniRuntime *hr, int *point_count
 }
 
 static void hruntime_fill_mesh(HoudiniRuntime *hr,
-	                           float *point_data, int point_count,
-	                           int *vertex_data, int vertex_count,
-	                           int *face_data, int face_count) {
+	                           Attribute point_data, int point_count,
+	                           Attribute vertex_data, int vertex_count,
+	                           Attribute face_data, int face_count) {
 	int current_point = 0, current_vertex = 0, current_face = 0;
+	size_t minimum_point_stride = point_data.componentCount * attributeTypeByteSize(point_data.type);
+	assert(minimum_point_stride == 3 * sizeof(float));
+	bool is_point_contiguous = point_data.stride == minimum_point_stride;
+
+	size_t minimum_face_stride = face_data.componentCount * attributeTypeByteSize(face_data.type);
+	assert(minimum_face_stride == 1 * sizeof(int));
+	bool is_face_contiguous = face_data.stride == minimum_face_stride;
 
 	for (int sid = 0; sid < hr->sop_count; ++sid) {
 		HAPI_Result res;
@@ -614,21 +638,15 @@ static void hruntime_fill_mesh(HoudiniRuntime *hr,
 
 		printf("Loading SOP #%d.\n", sid);
 
-		res = HAPI_GetGeoInfo(&hr->hsession, node_id, &geo_info);
-		if (HAPI_RESULT_SUCCESS != res) {
-			ERR("HAPI_GetGeoInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+		H_CHECK_OR(HAPI_GetGeoInfo(&hr->hsession, node_id, &geo_info))
 			continue;
-		}
 
 		for (int i = 0; i < geo_info.partCount; ++i) {
 			HAPI_PartInfo part_info;
 			HAPI_PartId part_id = (HAPI_PartId)i;
 
-			res = HAPI_GetPartInfo(&hr->hsession, node_id, part_id, &part_info);
-			if (HAPI_RESULT_SUCCESS != res) {
-				ERR("HAPI_GetPartInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+			H_CHECK_OR(HAPI_GetPartInfo(&hr->hsession, node_id, part_id, &part_info))
 				continue;
-			}
 
 			printf("Part #%d: type %d, %d points, %d vertices, %d faces.\n", i, part_info.type, part_info.pointCount, part_info.vertexCount, part_info.faceCount);
 
@@ -638,38 +656,69 @@ static void hruntime_fill_mesh(HoudiniRuntime *hr,
 			}
 
 			HAPI_AttributeInfo pos_attr_info;
-			res = HAPI_GetAttributeInfo(&hr->hsession, node_id, part_id, "P", HAPI_ATTROWNER_POINT, &pos_attr_info);
-			if (HAPI_RESULT_SUCCESS != res) {
-				ERR("HAPI_GetAttributeInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+			H_CHECK_OR(HAPI_GetAttributeInfo(&hr->hsession, node_id, part_id, "P", HAPI_ATTROWNER_POINT, &pos_attr_info))
+				continue;
+
+			// Get Point data
+			float *part_point_data = 
+				is_point_contiguous
+				? point_data.data + point_data.stride * current_point
+				: malloc_array(minimum_point_stride, part_info.pointCount, "houdini point list");
+			H_CHECK_OR(HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, "P", &pos_attr_info, -1, part_point_data, 0, part_info.pointCount))
+			{
+				if (!is_point_contiguous) free_array(part_point_data);
 				continue;
 			}
 
-			// Get Point data
-			res = HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, "P", &pos_attr_info, -1, point_data + 3 * current_point, 0, part_info.pointCount);
-			if (HAPI_RESULT_SUCCESS != res) {
-				ERR("HAPI_GetAttributeFloatData: %u (%s)\n", res, HAPI_ResultMessage(res));
-				continue;
+			if (!is_point_contiguous)
+			{
+				// TODO: can be vectorized
+				for (int i = 0; i < part_info.pointCount; ++i) {
+					memcpy(
+						point_data.data + point_data.stride * (current_point + i),
+						part_point_data + minimum_point_stride * i,
+						minimum_point_stride);
+				}
+				free_array(part_point_data);
 			}
 
 			// Get Vertex Data
 			int *part_vertex_data = malloc_array(sizeof(int), part_info.vertexCount, "houdini vertex list");
-			res = HAPI_GetVertexList(&hr->hsession, node_id, part_id, part_vertex_data, 0, part_info.vertexCount);
-			if (HAPI_RESULT_SUCCESS != res) {
-				ERR("HAPI_GetVertexList: %u (%s)\n", res, HAPI_ResultMessage(res));
+			H_CHECK_OR(HAPI_GetVertexList(&hr->hsession, node_id, part_id, part_vertex_data, 0, part_info.vertexCount))
+			{
 				free_array(part_vertex_data);
 				continue;
 			}
+
 			// TODO: can be vectorized
 			for (int vid = 0 ; vid < part_info.vertexCount ; ++vid) {
-				vertex_data[current_vertex + vid] = current_point + part_vertex_data[vid];
+				int* v = (int*)(vertex_data.data + vertex_data.stride * (current_vertex + vid));
+				*v = current_point + part_vertex_data[vid];
 			}
 			free_array(part_vertex_data);
 
 			// Get face data
-			res = HAPI_GetFaceCounts(&hr->hsession, node_id, part_id, face_data + current_face, 0, part_info.faceCount);
-			if (HAPI_RESULT_SUCCESS != res) {
-				ERR("HAPI_GetFaceCounts: %u (%s)\n", res, HAPI_ResultMessage(res));
+			int* part_face_data =
+				is_face_contiguous
+				? face_data.data + face_data.stride * current_face
+				: malloc_array(minimum_face_stride, part_info.faceCount, "houdini face list");
+
+			H_CHECK_OR(HAPI_GetFaceCounts(&hr->hsession, node_id, part_id, part_face_data, 0, part_info.faceCount))
+			{
+				if (!is_face_contiguous) free_array(part_face_data);
 				continue;
+			}
+
+			if (!is_face_contiguous)
+			{
+				// TODO: can be vectorized
+				for (int i = 0; i < part_info.faceCount; ++i) {
+					memcpy(
+						face_data.data + face_data.stride * (current_face + i),
+						part_face_data + minimum_face_stride * i,
+						minimum_face_stride);
+				}
+				free_array(part_face_data);
 			}
 
 			current_point += part_info.pointCount;
@@ -679,10 +728,43 @@ static void hruntime_fill_mesh(HoudiniRuntime *hr,
 	}
 }
 
+/**
+ * For each of points, vertices and faces, Houdini's HAPI expects contiguous
+ * arrays while Attribute variables contain strided arrays. In general, we
+ * need to reallocate them, but when possible (ie. when already contiguous)
+ * we use the raw pointer to avoid extra memory allocation.
+ *
+ * TODO: cache contiguous_data arrays?
+ * TODO: parallelize this strided memcpy?
+ *
+ * @param count is the number of elements in the attribute
+ * If the return value must_free is set to true, returned data has been newly
+ * allocated and must hence be freed by the calling code.
+ */
+static char* contiguousAttributeData(Attribute attr, int count, bool *must_free)
+{
+	int minimum_stride = attr.componentCount * attributeTypeByteSize(attr.type);
+	bool is_contiguous = attr.stride == minimum_stride;
+	if (is_contiguous)
+	{
+		*must_free = false;
+		return attr.data;
+	}
+	else
+	{
+		*must_free = true;
+		char* contiguous_data = malloc_array(sizeof(char), minimum_stride * count, "contiguous input point data");
+		for (int i = 0; i < count; ++i) {
+			memcpy(contiguous_data + minimum_stride * i, attr.data + attr.stride * i, minimum_stride);
+		}
+		return contiguous_data;
+	}
+}
+
 static bool hruntime_feed_input_data(HoudiniRuntime *hr,
-	                                 float *point_data, int point_count,
-	                                 int *vertex_data, int vertex_count,
-	                                 int *face_data, int face_count) {
+	                                 Attribute point_data, int point_count,
+	                                 Attribute vertex_data, int vertex_count,
+	                                 Attribute face_data, int face_count) {
 	HAPI_Result res;
 
 	if (hr->input_sop_id == -1) {
@@ -694,47 +776,33 @@ static bool hruntime_feed_input_data(HoudiniRuntime *hr,
 	part_info.vertexCount = vertex_count;
 	part_info.faceCount = face_count;
 	part_info.isInstanced = false;
-	res = HAPI_SetPartInfo(&hr->hsession, hr->input_sop_id, 0, &part_info);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_SetPartInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
-		return false;
-	}
+	H_CHECK(HAPI_SetPartInfo(&hr->hsession, hr->input_sop_id, 0, &part_info));
 
 	HAPI_AttributeInfo attrib_info = HAPI_AttributeInfo_Create();
 	attrib_info.exists = true;
 	attrib_info.owner = HAPI_ATTROWNER_POINT;
 	attrib_info.count = point_count;
-	attrib_info.tupleSize = 3;
+	attrib_info.tupleSize = point_data.componentCount;
 	attrib_info.storage = HAPI_STORAGETYPE_FLOAT;
 	attrib_info.typeInfo = HAPI_ATTRIBUTE_TYPE_POINT;
-	res = HAPI_AddAttribute(&hr->hsession, hr->input_sop_id, 0, HAPI_ATTRIB_POSITION, &attrib_info);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_AddAttribute: %u (%s)\n", res, HAPI_ResultMessage(res));
-		return false;
-	}
-	res = HAPI_SetAttributeFloatData(&hr->hsession, hr->input_sop_id, 0, HAPI_ATTRIB_POSITION, &attrib_info, point_data, 0, point_count);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_SetAttributeFloatData: %u (%s)\n", res, HAPI_ResultMessage(res));
-		return false;
-	}
 
-	res = HAPI_SetVertexList(&hr->hsession, hr->input_sop_id, 0, vertex_data, 0, vertex_count);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_SetVertexList: %u (%s)\n", res, HAPI_ResultMessage(res));
-		return false;
-	}
+	H_CHECK(HAPI_AddAttribute(&hr->hsession, hr->input_sop_id, 0, HAPI_ATTRIB_POSITION, &attrib_info));
 
-	res = HAPI_SetFaceCounts(&hr->hsession, hr->input_sop_id, 0, face_data, 0, face_count);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_SetFaceCounts: %u (%s)\n", res, HAPI_ResultMessage(res));
-		return false;
-	}
+	bool must_free;
 
-	res = HAPI_CommitGeo(&hr->hsession, hr->input_sop_id);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_CommitGeo: %u (%s)\n", res, HAPI_ResultMessage(res));
-		return false;
-	}
+	float *contiguous_point_data = (float*)contiguousAttributeData(point_data, point_count, &must_free);
+	H_CHECK(HAPI_SetAttributeFloatData(&hr->hsession, hr->input_sop_id, 0, HAPI_ATTRIB_POSITION, &attrib_info, contiguous_point_data, 0, point_count));
+	if (must_free) free_array(contiguous_point_data);
+
+	int* contiguous_vertex_data = (int*)contiguousAttributeData(vertex_data, vertex_count, &must_free);
+	H_CHECK(HAPI_SetVertexList(&hr->hsession, hr->input_sop_id, 0, contiguous_vertex_data, 0, vertex_count));
+	if (must_free) free_array(contiguous_vertex_data);
+
+	int* contiguous_face_data = (int*)contiguousAttributeData(face_data, face_count, &must_free);
+	H_CHECK(HAPI_SetFaceCounts(&hr->hsession, hr->input_sop_id, 0, contiguous_face_data, 0, face_count));
+	if (must_free) free_array(contiguous_face_data);
+
+	H_CHECK(HAPI_CommitGeo(&hr->hsession, hr->input_sop_id));
 
 	return true;
 }
@@ -963,23 +1031,17 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropVertexCount, 0, &input_vertex_count));
 	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropFaceCount, 0, &input_face_count));
 
-	float *input_points;
-	int *input_vertices;
-	int *input_faces;
-	OfxPropertySetHandle pos_attrib, vertpoint_attrib, facecounts_attrib;
-	MFX_CHECK(meshEffectSuite->meshGetAttribute(input_mesh, kOfxMeshAttribPoint, kOfxMeshAttribPointPosition, &pos_attrib));
-	MFX_CHECK(propertySuite->propGetPointer(pos_attrib, kOfxMeshAttribPropData, 0, (void**)&input_points));
-	MFX_CHECK(meshEffectSuite->meshGetAttribute(input_mesh, kOfxMeshAttribVertex, kOfxMeshAttribVertexPoint, &vertpoint_attrib));
-	MFX_CHECK(propertySuite->propGetPointer(vertpoint_attrib, kOfxMeshAttribPropData, 0, (void**)&input_vertices));
-	MFX_CHECK(meshEffectSuite->meshGetAttribute(input_mesh, kOfxMeshAttribFace, kOfxMeshAttribFaceCounts, &facecounts_attrib));
-	MFX_CHECK(propertySuite->propGetPointer(facecounts_attrib, kOfxMeshAttribPropData, 0, (void**)&input_faces));
+	Attribute input_pos, input_vertpoint, input_facecounts;
+	MFX_CHECK2(getPointAttribute(runtime, input_mesh, kOfxMeshAttribPointPosition, &input_pos));
+	MFX_CHECK2(getVertexAttribute(runtime, input_mesh, kOfxMeshAttribVertexPoint, &input_vertpoint));
+	MFX_CHECK2(getFaceAttribute(runtime, input_mesh, kOfxMeshAttribFaceCounts, &input_facecounts));
 
 	printf("DEBUG: Found %d points in input mesh\n", input_point_count);
 
 	hruntime_feed_input_data(hr,
-		                     input_points, input_point_count,
-		                     input_vertices, input_vertex_count,
-		                     input_faces, input_face_count);
+		                     input_pos, input_point_count,
+		                     input_vertpoint, input_vertex_count,
+		                     input_facecounts, input_face_count);
 	
 	MFX_CHECK(meshEffectSuite->inputReleaseMesh(input_mesh));
 
@@ -1032,20 +1094,16 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 
 	MFX_CHECK(meshEffectSuite->meshAlloc(output_mesh));
 
-	float* output_points;
-	int* output_vertices, * output_faces;
-	MFX_CHECK(meshEffectSuite->meshGetAttribute(output_mesh, kOfxMeshAttribPoint, kOfxMeshAttribPointPosition, &pos_attrib));
-	MFX_CHECK(propertySuite->propGetPointer(pos_attrib, kOfxMeshAttribPropData, 0, (void**)&output_points));
-	MFX_CHECK(meshEffectSuite->meshGetAttribute(output_mesh, kOfxMeshAttribVertex, kOfxMeshAttribVertexPoint, &vertpoint_attrib));
-	MFX_CHECK(propertySuite->propGetPointer(vertpoint_attrib, kOfxMeshAttribPropData, 0, (void**)&output_vertices));
-	MFX_CHECK(meshEffectSuite->meshGetAttribute(output_mesh, kOfxMeshAttribFace, kOfxMeshAttribFaceCounts, &facecounts_attrib));
-	MFX_CHECK(propertySuite->propGetPointer(facecounts_attrib, kOfxMeshAttribPropData, 0, (void**)&output_faces));
+	Attribute output_pos, output_vertpoint, output_facecounts;
+	MFX_CHECK2(getPointAttribute(runtime, output_mesh, kOfxMeshAttribPointPosition, &output_pos));
+	MFX_CHECK2(getVertexAttribute(runtime, output_mesh, kOfxMeshAttribVertexPoint, &output_vertpoint));
+	MFX_CHECK2(getFaceAttribute(runtime, output_mesh, kOfxMeshAttribFaceCounts, &output_facecounts));
 
 	// Fill data
 	hruntime_fill_mesh(hr,
-		               output_points, output_point_count,
-		               output_vertices, output_vertex_count,
-		               output_faces, output_face_count);
+		               output_pos, output_point_count,
+		               output_vertpoint, output_vertex_count,
+		               output_facecounts, output_face_count);
 
 	status = runtime->meshEffectSuite->inputReleaseMesh(output_mesh);
 	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));

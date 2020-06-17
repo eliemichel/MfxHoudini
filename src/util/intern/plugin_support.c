@@ -35,6 +35,22 @@ enum AttributeType mfxAttrAsEnum(const char *attr_type)
   return MFX_UNKNOWN_ATTR;
 }
 
+size_t attributeTypeByteSize(enum AttributeType type)
+{
+    switch (type)
+    {
+    case MFX_UBYTE_ATTR:
+        return 1;
+    case MFX_INT_ATTR:
+        return sizeof(int);
+    case MFX_FLOAT_ATTR:
+        return sizeof(float);
+    default:
+        return 0;
+        break;
+    }
+}
+
 OfxStatus getAttribute(PluginRuntime* runtime, OfxMeshHandle mesh, const char *attachment, const char *name, Attribute *attr)
 {
   const OfxMeshEffectSuiteV1 *meshEffectSuite = runtime->meshEffectSuite;
