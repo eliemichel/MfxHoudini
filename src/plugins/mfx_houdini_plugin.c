@@ -18,6 +18,7 @@
 
 #include "util/ofx_util.h"
 #include "util/memory_util.h"
+#include "util/plugin_support.h"
 
 #include "ofxCore.h"
 #include "ofxMeshEffect.h"
@@ -37,6 +38,11 @@
 #define MOD_HOUDINI_MAX_PARAMETER_NAME 256
 
 #define kOfxPropHoudiniNodeId "OfxPropHoudiniNodeId"
+
+#define MFX_CHECK(op) status = runtime->op; \
+if (kOfxStatOK != status) {\
+printf("Suite method call '" #op "' returned status %d (%s)\n", status, getOfxStateName(status)); \
+}
 
 // Utils
 
@@ -746,7 +752,7 @@ const char * get_hda_path() {
 }
 
 // OFX
-
+/*
 typedef struct PluginRuntime {
 	OfxPlugin plugin;
 	int pluginIndex;
@@ -756,24 +762,26 @@ typedef struct PluginRuntime {
 	OfxMeshEffectSuiteV1 *meshEffectSuite;
 	HoudiniRuntime *houdiniRuntime;
 } PluginRuntime;
-
+*/
 static OfxStatus plugin_load(PluginRuntime *runtime) {
 	OfxHost *h = runtime->host;
 	runtime->propertySuite = (OfxPropertySuiteV1*)h->fetchSuite(h->host, kOfxPropertySuite, 1);
 	runtime->parameterSuite = (OfxParameterSuiteV1*)h->fetchSuite(h->host, kOfxParameterSuite, 1);
 	runtime->meshEffectSuite = (OfxMeshEffectSuiteV1*)h->fetchSuite(h->host, kOfxMeshEffectSuite, 1);
-	runtime->houdiniRuntime = malloc_array(sizeof(HoudiniRuntime), 1, "houdini runtime");
-	if (false == hruntime_init(runtime->houdiniRuntime)) {
+	runtime->userData = malloc_array(sizeof(HoudiniRuntime), 1, "houdini runtime");
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
+	if (false == hruntime_init(hr)) {
 		return kOfxStatFailed;
 	}
 
-	hruntime_set_library(runtime->houdiniRuntime, get_hda_path());
-	runtime->houdiniRuntime->current_asset_index = runtime->pluginIndex;
+	hruntime_set_library(hr, get_hda_path());
+	hr->current_asset_index = runtime->pluginIndex;
 	return kOfxStatOK;
 }
 
 static OfxStatus plugin_unload(PluginRuntime *runtime) {
-	hruntime_free(runtime->houdiniRuntime);
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
+	hruntime_free(hr);
 	return kOfxStatOK;
 }
 
@@ -785,40 +793,34 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 	OfxStatus status;
 	OfxPropertySetHandle propHandle;
 
-	status = runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
-	printf("Suite method 'getPropertySet' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->getPropertySet(meshEffect, &propHandle));
 
-	status = runtime->propertySuite->propSetString(propHandle, kOfxMeshEffectPropContext, 0, kOfxMeshEffectContextFilter);
-	printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(propertySuite->propSetString(propHandle, kOfxMeshEffectPropContext, 0, kOfxMeshEffectContextFilter));
 
 	// Shall move into "describe in context" when it will exist
 	OfxPropertySetHandle inputProperties;
-	status = runtime->meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainInput, &inputProperties);
-	printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainInput, &inputProperties));
 
-	status = runtime->propertySuite->propSetString(inputProperties, kOfxPropLabel, 0, "Main Input");
-	printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(propertySuite->propSetString(inputProperties, kOfxPropLabel, 0, "Main Input"));
 
 	OfxPropertySetHandle outputProperties;
-	status = runtime->meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainOutput, &outputProperties); // yes, output are also "inputs", I should change this name in the API
-	printf("Suite method 'inputDefine' returned status %d (%s)\n", status, getOfxStateName(status));
-
-	status = runtime->propertySuite->propSetString(outputProperties, kOfxPropLabel, 0, "Main Output");
-	printf("Suite method 'propSetString' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainOutput, &outputProperties)); // yes, output are also "inputs", I should change this name in the API
+	
+	MFX_CHECK(propertySuite->propSetString(outputProperties, kOfxPropLabel, 0, "Main Output"));
 
 	// Declare parameters
 	OfxParamSetHandle parameters;
 	OfxParamHandle param;
-	status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
-	printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->getParamSet(meshEffect, &parameters));
 
-	hruntime_create_node(runtime->houdiniRuntime);
-	hruntime_fetch_parameters(runtime->houdiniRuntime);
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
+	hruntime_create_node(hr);
+	hruntime_fetch_parameters(hr);
 	char name[MOD_HOUDINI_MAX_PARAMETER_NAME];
-	for (int i = 0 ; i < runtime->houdiniRuntime->parm_count ; ++i) {
-		hruntime_get_parameter_name(runtime->houdiniRuntime, i, name);
+	for (int i = 0 ; i < hr->parm_count ; ++i) {
+		hruntime_get_parameter_name(hr, i, name);
 
-		HAPI_ParmInfo info = runtime->houdiniRuntime->parm_infos_array[i];
+		HAPI_ParmInfo info = hr->parm_infos_array[i];
 		const char *type = houdini_to_ofx_type(info.type, info.size);
 
 		if (NULL != type && 0 == strncmp(name, "mfx_", 4)) {
@@ -827,23 +829,23 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 			printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
 		}
 	}
-	hruntime_destroy_node(runtime->houdiniRuntime);
+	hruntime_destroy_node(hr);
 
 	return kOfxStatOK;
 }
 
 static OfxStatus plugin_create_instance(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
-	HoudiniRuntime *hr = runtime->houdiniRuntime;
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
 	OfxPropertySetHandle propHandle;
 	hruntime_create_node(hr);
-	hruntime_fetch_parameters(runtime->houdiniRuntime);
+	hruntime_fetch_parameters(hr);
 	runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
 	runtime->propertySuite->propSetInt(propHandle, kOfxPropHoudiniNodeId, 0, hr->node_id);
 	return kOfxStatOK;
 }
 
 static OfxStatus plugin_destroy_instance(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
-	HoudiniRuntime *hr = runtime->houdiniRuntime;
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
 	OfxPropertySetHandle propHandle;
 	runtime->meshEffectSuite->getPropertySet(meshEffect, &propHandle);
 	runtime->propertySuite->propGetInt(propHandle, kOfxPropHoudiniNodeId, 0, &hr->node_id);
@@ -863,7 +865,7 @@ static void copy_d4_to_f4(float float_values[4], double double_values[4]) {
 }
 
 static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAPI_ParmType type, int size, OfxParamHandle param) {
-	
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
 	double double_values[4];
 	float float_values[4];
 	int int_values[4];
@@ -884,7 +886,7 @@ static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAP
 		default:
 			return false;
 		}
-		hruntime_set_int_parm(runtime->houdiniRuntime, parm_index, int_values, size);
+		hruntime_set_int_parm(hr, parm_index, int_values, size);
 		break;
 	case HAPI_PARMTYPE_FLOAT:
 		switch (size) {
@@ -903,7 +905,7 @@ static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAP
 			return false;
 		}
 		copy_d4_to_f4(float_values, double_values);
-		hruntime_set_float_parm(runtime->houdiniRuntime, parm_index, float_values, size);
+		hruntime_set_float_parm(hr, parm_index, float_values, size);
 		break;
 	case HAPI_PARMTYPE_COLOR:
 		switch (size) {
@@ -917,7 +919,7 @@ static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAP
 			return false;
 		}
 		copy_d4_to_f4(float_values, double_values);
-		hruntime_set_float_parm(runtime->houdiniRuntime, parm_index, float_values, size);
+		hruntime_set_float_parm(hr, parm_index, float_values, size);
 		break;
 	case HAPI_PARMTYPE_STRING:
 		return false; // TODO
@@ -931,7 +933,7 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	OfxStatus status;
 	OfxMeshInputHandle input, output;
 	OfxPropertySetHandle propertySet, effectProperties;
-	HoudiniRuntime *hr = runtime->houdiniRuntime;
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
 
 	// Set node id in houdini runtime to match this mesh effect instance
 	runtime->meshEffectSuite->getPropertySet(meshEffect, &effectProperties);
@@ -950,54 +952,47 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	}
 
 	OfxTime time = 0;
-	OfxPropertySetHandle input_mesh;
-	status = runtime->meshEffectSuite->inputGetMesh(input, time, &input_mesh);
-	printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	OfxMeshHandle input_mesh;
+	OfxPropertySetHandle input_mesh_prop;
+	
+	MFX_CHECK(meshEffectSuite->inputGetMesh(input, time, &input_mesh, &input_mesh_prop));
 
 	// Get input data
 	int input_point_count = 0, input_vertex_count = 0, input_face_count = 0;
-	status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropPointCount, 0, &input_point_count);
-	printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
-
-	status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropVertexCount, 0, &input_vertex_count);
-	printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
-
-	status = runtime->propertySuite->propGetInt(input_mesh, kOfxMeshPropFaceCount, 0, &input_face_count);
-	printf("Suite method 'propGetInt' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropPointCount, 0, &input_point_count));
+	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropVertexCount, 0, &input_vertex_count));
+	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropFaceCount, 0, &input_face_count));
 
 	float *input_points;
-	status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropPointData, 0, (void**)&input_points);
-	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
-
 	int *input_vertices;
-	status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropVertexData, 0, (void**)&input_vertices);
-	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
-
 	int *input_faces;
-	status = runtime->propertySuite->propGetPointer(input_mesh, kOfxMeshPropFaceData, 0, (void**)&input_faces);
-	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
+	OfxPropertySetHandle pos_attrib, vertpoint_attrib, facecounts_attrib;
+	MFX_CHECK(meshEffectSuite->meshGetAttribute(input_mesh, kOfxMeshAttribPoint, kOfxMeshAttribPointPosition, &pos_attrib));
+	MFX_CHECK(propertySuite->propGetPointer(pos_attrib, kOfxMeshAttribPropData, 0, (void**)&input_points));
+	MFX_CHECK(meshEffectSuite->meshGetAttribute(input_mesh, kOfxMeshAttribVertex, kOfxMeshAttribVertexPoint, &vertpoint_attrib));
+	MFX_CHECK(propertySuite->propGetPointer(vertpoint_attrib, kOfxMeshAttribPropData, 0, (void**)&input_vertices));
+	MFX_CHECK(meshEffectSuite->meshGetAttribute(input_mesh, kOfxMeshAttribFace, kOfxMeshAttribFaceCounts, &facecounts_attrib));
+	MFX_CHECK(propertySuite->propGetPointer(facecounts_attrib, kOfxMeshAttribPropData, 0, (void**)&input_faces));
 
 	printf("DEBUG: Found %d points in input mesh\n", input_point_count);
 
-	hruntime_feed_input_data(runtime->houdiniRuntime,
+	hruntime_feed_input_data(hr,
 		                     input_points, input_point_count,
 		                     input_vertices, input_vertex_count,
 		                     input_faces, input_face_count);
 	
-	status = runtime->meshEffectSuite->inputReleaseMesh(input_mesh);
-	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->inputReleaseMesh(input_mesh));
 
 	// Get parameters
 	OfxParamSetHandle parameters;
 	OfxParamHandle param;
-	status = runtime->meshEffectSuite->getParamSet(meshEffect, &parameters);
-	printf("Suite method 'getParamSet' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->getParamSet(meshEffect, &parameters));
 
 	char name[MOD_HOUDINI_MAX_PARAMETER_NAME];
-	for (int i = 0 ; i < runtime->houdiniRuntime->parm_count ; ++i) {
-		hruntime_get_parameter_name(runtime->houdiniRuntime, i, name);
+	for (int i = 0 ; i < hr->parm_count ; ++i) {
+		hruntime_get_parameter_name(hr, i, name);
 
-		HAPI_ParmInfo info = runtime->houdiniRuntime->parm_infos_array[i];
+		HAPI_ParmInfo info = hr->parm_infos_array[i];
 		const char *type = houdini_to_ofx_type(info.type, info.size);
 
 		if (NULL != type && 0 == strncmp(name, "mfx_", 4)) {
@@ -1010,43 +1005,44 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 
 	// Core cook
 
-	if (false == hruntime_cook_asset(runtime->houdiniRuntime)) {
+	if (false == hruntime_cook_asset(hr)) {
 		return kOfxStatErrUnknown;
 	}
-	if (false == hruntime_fetch_sops(runtime->houdiniRuntime)) {
+	if (false == hruntime_fetch_sops(hr)) {
 		return kOfxStatErrUnknown;
 	}
 
-	OfxPropertySetHandle output_mesh;
-	status = runtime->meshEffectSuite->inputGetMesh(output, time, &output_mesh);
+	OfxMeshHandle output_mesh;
+	OfxPropertySetHandle output_mesh_prop;
+	status = runtime->meshEffectSuite->inputGetMesh(output, time, &output_mesh, &output_mesh_prop);
 	printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
 
 	// Consolidate geo counts
 	int output_point_count = 0, output_vertex_count = 0, output_face_count = 0;
-	hruntime_consolidate_geo_counts(runtime->houdiniRuntime,
+	hruntime_consolidate_geo_counts(hr,
 		                            &output_point_count,
 		                            &output_vertex_count,
 		                            &output_face_count);
 
 	printf("DEBUG: Allocating output mesh data: %d points, %d vertices, %d faces\n", output_point_count, output_vertex_count, output_face_count);
 
-	status = runtime->meshEffectSuite->meshAlloc(output_mesh, output_point_count, output_vertex_count, output_face_count);
-	printf("Suite method 'meshAlloc' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropPointCount, 0, output_point_count));
+	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropVertexCount, 0, output_vertex_count));
+	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropFaceCount, 0, output_face_count));
 
-	float *output_points;
-	status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropPointData, 0, (void**)&output_points);
-	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->meshAlloc(output_mesh));
 
-	int *output_vertices;
-	status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropVertexData, 0, (void**)&output_vertices);
-	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
-
-	int *output_faces;
-	status = runtime->propertySuite->propGetPointer(output_mesh, kOfxMeshPropFaceData, 0, (void**)&output_faces);
-	printf("Suite method 'propGetPointer' returned status %d (%s)\n", status, getOfxStateName(status));
+	float* output_points;
+	int* output_vertices, * output_faces;
+	MFX_CHECK(meshEffectSuite->meshGetAttribute(output_mesh, kOfxMeshAttribPoint, kOfxMeshAttribPointPosition, &pos_attrib));
+	MFX_CHECK(propertySuite->propGetPointer(pos_attrib, kOfxMeshAttribPropData, 0, (void**)&output_points));
+	MFX_CHECK(meshEffectSuite->meshGetAttribute(output_mesh, kOfxMeshAttribVertex, kOfxMeshAttribVertexPoint, &vertpoint_attrib));
+	MFX_CHECK(propertySuite->propGetPointer(vertpoint_attrib, kOfxMeshAttribPropData, 0, (void**)&output_vertices));
+	MFX_CHECK(meshEffectSuite->meshGetAttribute(output_mesh, kOfxMeshAttribFace, kOfxMeshAttribFaceCounts, &facecounts_attrib));
+	MFX_CHECK(propertySuite->propGetPointer(facecounts_attrib, kOfxMeshAttribPropData, 0, (void**)&output_faces));
 
 	// Fill data
-	hruntime_fill_mesh(runtime->houdiniRuntime,
+	hruntime_fill_mesh(hr,
 		               output_points, output_point_count,
 		               output_vertices, output_vertex_count,
 		               output_faces, output_face_count);
