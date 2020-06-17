@@ -107,3 +107,20 @@ const char* houdini_to_ofx_type(HAPI_ParmType houdini_type, int size) {
 		return NULL;
 	}
 }
+
+size_t storageByteSize(HAPI_StorageType storage)
+{
+	switch (storage)
+	{
+	case HAPI_STORAGETYPE_INT:
+		return sizeof(int);
+	case HAPI_STORAGETYPE_INT64:
+		return 2 * sizeof(int);
+	case HAPI_STORAGETYPE_FLOAT:
+		return sizeof(float);
+	case HAPI_STORAGETYPE_FLOAT64:
+		return sizeof(double);
+	default:
+		return 0;
+	}
+}

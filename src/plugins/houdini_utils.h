@@ -69,5 +69,6 @@ const char* HAPI_ResultMessage(HAPI_Result res);
  */
 const char* houdini_to_ofx_type(HAPI_ParmType houdini_type, int size);
 
+size_t storageByteSize(HAPI_StorageType storage);
 
 #endif // H_HOUDINI_UTILS

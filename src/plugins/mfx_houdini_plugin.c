@@ -361,9 +361,16 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropVertexCount, 0, output_vertex_count));
 	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropFaceCount, 0, output_face_count));
 
+	// Declare output attributes
+	bool has_uv = hruntime_has_vertex_attribute(hr, "uv");
+	if (has_uv) {
+		OfxPropertySetHandle uv_attrib;
+		MFX_CHECK(meshEffectSuite->attributeDefine(output_mesh, kOfxMeshAttribVertex, "uv0", 2, kOfxMeshAttribTypeFloat, &uv_attrib));
+	}
+
 	MFX_CHECK(meshEffectSuite->meshAlloc(output_mesh));
 
-	Attribute output_pos, output_vertpoint, output_facecounts;
+	Attribute output_pos, output_vertpoint, output_facecounts, output_uv;
 	MFX_CHECK2(getPointAttribute(runtime, output_mesh, kOfxMeshAttribPointPosition, &output_pos));
 	MFX_CHECK2(getVertexAttribute(runtime, output_mesh, kOfxMeshAttribVertexPoint, &output_vertpoint));
 	MFX_CHECK2(getFaceAttribute(runtime, output_mesh, kOfxMeshAttribFaceCounts, &output_facecounts));
@@ -373,6 +380,11 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 		               output_pos, output_point_count,
 		               output_vertpoint, output_vertex_count,
 		               output_facecounts, output_face_count);
+
+	if (has_uv) {
+		MFX_CHECK2(getVertexAttribute(runtime, output_mesh, "uv0", &output_uv));
+		hruntime_fill_vertex_attribute(hr, output_uv, "uv");
+	}
 
 	status = runtime->meshEffectSuite->inputReleaseMesh(output_mesh);
 	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));

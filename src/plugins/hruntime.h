@@ -81,11 +81,18 @@ void hruntime_consolidate_geo_counts(
     int* vertex_count_ptr,
     int* face_count_ptr);
 
+bool hruntime_has_vertex_attribute(HoudiniRuntime* hr, const char* attr_name);
+
 void hruntime_fill_mesh(
     HoudiniRuntime* hr,
     Attribute point_data, int point_count,
     Attribute vertex_data, int vertex_count,
     Attribute face_data, int face_count);
+
+void hruntime_fill_vertex_attribute(
+    HoudiniRuntime* hr,
+    Attribute uv_data,
+    const char* attr_name);
 
 bool hruntime_feed_input_data(
     HoudiniRuntime* hr,

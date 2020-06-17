@@ -409,6 +409,37 @@ void hruntime_consolidate_geo_counts(HoudiniRuntime* hr, int* point_count_ptr, i
 	}
 }
 
+bool hruntime_has_vertex_attribute(HoudiniRuntime* hr, const char *attr_name)
+{
+	HAPI_Result res;
+	HAPI_GeoInfo geo_info;
+	HAPI_PartInfo part_info;
+
+	for (int sid = 0; sid < hr->sop_count; ++sid) {
+		HAPI_NodeId node_id = hr->sop_array[sid];
+
+		H_CHECK_OR(HAPI_GetGeoInfo(&hr->hsession, node_id, &geo_info))
+			continue;
+
+		for (int i = 0; i < geo_info.partCount; ++i) {
+			HAPI_PartId part_id = (HAPI_PartId)i;
+
+			H_CHECK_OR(HAPI_GetPartInfo(&hr->hsession, node_id, part_id, &part_info))
+				continue;
+
+			if (part_info.type != HAPI_PARTTYPE_MESH)
+				continue;
+
+			HAPI_AttributeInfo attr_info;
+			H_CHECK_OR(HAPI_GetAttributeInfo(&hr->hsession, node_id, part_id, attr_name, HAPI_ATTROWNER_VERTEX, &attr_info))
+				continue;
+
+			if (attr_info.exists) return true;
+		}
+	}
+	return false;
+}
+
 void hruntime_fill_mesh(HoudiniRuntime* hr,
 	Attribute point_data, int point_count,
 	Attribute vertex_data, int vertex_count,
@@ -515,6 +546,76 @@ void hruntime_fill_mesh(HoudiniRuntime* hr,
 			current_point += part_info.pointCount;
 			current_vertex += part_info.vertexCount;
 			current_face += part_info.faceCount;
+		}
+	}
+}
+
+void hruntime_fill_vertex_attribute(HoudiniRuntime* hr, Attribute attr_data, const char* attr_name)
+{
+	HAPI_Result res;
+	HAPI_GeoInfo geo_info;
+	int current_vertex = 0;
+
+	size_t minimum_stride = attr_data.componentCount * attributeTypeByteSize(attr_data.type);
+	bool is_contiguous = attr_data.stride == minimum_stride;
+
+	for (int sid = 0; sid < hr->sop_count; ++sid) {
+		HAPI_NodeId node_id = hr->sop_array[sid];
+
+		H_CHECK_OR(HAPI_GetGeoInfo(&hr->hsession, node_id, &geo_info))
+			continue;
+
+		for (int i = 0; i < geo_info.partCount; ++i) {
+			HAPI_PartInfo part_info;
+			HAPI_PartId part_id = (HAPI_PartId)i;
+
+			H_CHECK_OR(HAPI_GetPartInfo(&hr->hsession, node_id, part_id, &part_info))
+				continue;
+
+			if (part_info.type != HAPI_PARTTYPE_MESH) {
+				printf("Ignoring non-mesh part.\n");
+				continue;
+			}
+
+			HAPI_AttributeInfo attr_info;
+			H_CHECK_OR(HAPI_GetAttributeInfo(&hr->hsession, node_id, part_id, attr_name, HAPI_ATTROWNER_VERTEX, &attr_info))
+			{
+				current_vertex += part_info.vertexCount;
+				continue;
+			}
+
+			if (!attr_info.exists)
+			{
+				current_vertex += part_info.vertexCount;
+				continue;
+			}
+
+			// Get Point data
+			size_t houdini_stride = attr_info.tupleSize * storageByteSize(attr_info.storage);
+			bool can_raw_copy = is_contiguous && minimum_stride == houdini_stride;
+			float* part_data =
+				can_raw_copy
+				? attr_data.data + attr_data.stride * current_vertex
+				: malloc_array(minimum_stride, part_info.vertexCount, "houdini vertex attribute data");
+			H_CHECK_OR(HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, attr_name, &attr_info, -1, part_data, 0, part_info.vertexCount))
+			{
+				if (!can_raw_copy) free_array(part_data);
+				continue;
+			}
+
+			if (!can_raw_copy)
+			{
+				// TODO: strided memcpy, can be vectorized
+				for (int i = 0; i < part_info.vertexCount; ++i) {
+					memcpy(
+						attr_data.data + attr_data.stride * (current_vertex + i),
+						part_data + houdini_stride * i,
+						minimum_stride);
+				}
+				free_array(part_data);
+			}
+
+			current_vertex += part_info.vertexCount;
 		}
 	}
 }
