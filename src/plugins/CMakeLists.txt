@@ -24,7 +24,13 @@ set(INC
 
 set(SRC
   mfx_houdini_plugin.c
+  houdini_utils.h
+  houdini_utils.c
+  hruntime.h
+  hruntime.c
 )
+
+
 
 set(LIB
   openmesheffect_openfx
