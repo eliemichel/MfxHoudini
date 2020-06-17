@@ -216,16 +216,12 @@ static bool hruntime_init(HoudiniRuntime *hr) {
 
 		printf("Creating Houdini Session\n");
 
-		res = HAPI_CreateInProcessSession(&global_hsession);
-		if (HAPI_RESULT_SUCCESS != res) {
-			ERR("Houdini error in HAPI_CreateInProcessSession: %u (%s)\n", res, HAPI_ResultMessage(res));
-			return false;
-		}
+		H_CHECK(HAPI_CreateInProcessSession(&global_hsession));
 
-		res = HAPI_Initialize(&global_hsession, &cookOptions, false /* threaded cooking */, -1, NULL, NULL, NULL, NULL, NULL);
-		if (HAPI_RESULT_SUCCESS != res) {
-			ERR("Houdini error in HAPI_Initialize: %u (%s)\n", res, HAPI_ResultMessage(res));
-			return false;
+		H_CHECK_OR(HAPI_Initialize(&global_hsession, &cookOptions, false /* threaded cooking */, -1, NULL, NULL, NULL, NULL, NULL))
+		{
+			if (HAPI_RESULT_ALREADY_INITIALIZED != res)
+				return false;
 		}
 	}
 
