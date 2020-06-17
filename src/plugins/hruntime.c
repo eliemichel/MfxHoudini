@@ -48,22 +48,64 @@ void hruntime_set_error(HoudiniRuntime* hr, const char* fmt, ...) {
 	fprintf(stderr, "Houdini Runtime error: %s", hr->error_message);
 }
 
+#ifdef LOCAL_HSESSION
+static bool houdini_session_init(HoudiniRuntime* hr)
+{
+	HAPI_Result res;
+	HAPI_CookOptions cookOptions;
+	cookOptions.maxVerticesPerPrimitive = -1;
+
+	printf("Creating Houdini Session\n");
+
+	H_CHECK(HAPI_CreateInProcessSession(&global_hsession));
+
+	H_CHECK_OR(HAPI_Initialize(&global_hsession, &cookOptions, false /* threaded cooking */, -1, NULL, NULL, NULL, NULL, NULL))
+	{
+		if (HAPI_RESULT_ALREADY_INITIALIZED != res)
+			return false;
+	}
+
+	return true;
+}
+#else // LOCAL_HSESSION
+static bool houdini_session_init(HoudiniRuntime* hr)
+{
+	HAPI_Result res;
+
+	// HARS server options
+	HAPI_ThriftServerOptions serverOptions;
+	serverOptions.autoClose = true;
+	serverOptions.timeoutMs = 3000.0f;
+
+	// Start our HARS server using the "hapi" named pipe
+	// This call can be ignored if you have launched HARS manually before
+	H_CHECK(HAPI_StartThriftNamedPipeServer(&serverOptions, "hapi", NULL));
+
+	// Create a new HAPI session to use with that server
+	H_CHECK(HAPI_CreateThriftNamedPipeSession(&global_hsession, "hapi"));
+
+	// Initialize HAPI
+	HAPI_CookOptions cookOptions = HAPI_CookOptions_Create();
+	H_CHECK(HAPI_Initialize(
+		&global_hsession,           // session
+		&cookOptions,       // cook options
+		false,                       // use_cooking_thread
+		-1,                         // cooking_thread_stack_size
+		"",                         // houdini_environment_files
+		NULL,            // otl_search_path
+		NULL,            // dso_search_path
+		NULL,            // image_dso_search_path
+		NULL));              // audio_dso_search_path
+	
+	return true;
+}
+#endif // else LOCAL_HSESSION
+
 bool hruntime_init(HoudiniRuntime* hr) {
 	HAPI_Result res;
 
 	if (0 == global_hsession_users) {
-		HAPI_CookOptions cookOptions;
-		cookOptions.maxVerticesPerPrimitive = -1;
-
-		printf("Creating Houdini Session\n");
-
-		H_CHECK(HAPI_CreateInProcessSession(&global_hsession));
-
-		H_CHECK_OR(HAPI_Initialize(&global_hsession, &cookOptions, false /* threaded cooking */, -1, NULL, NULL, NULL, NULL, NULL))
-		{
-			if (HAPI_RESULT_ALREADY_INITIALIZED != res)
-				return false;
-		}
+		if (!houdini_session_init(hr)) return false;
 	}
 
 	global_hsession_users++;
