@@ -423,22 +423,16 @@ static void hruntime_fetch_parameters(HoudiniRuntime *hr) {
 	}
 
 	HAPI_NodeInfo node_info;
-	res = HAPI_GetNodeInfo(&hr->hsession, hr->node_id, &node_info);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_GetNodeInfo: %u (%s)\n", res, HAPI_ResultMessage(res));
+	H_CHECK_OR(HAPI_GetNodeInfo(&hr->hsession, hr->node_id, &node_info))
 		return;
-	}
 
 	hr->parm_count = node_info.parmCount;
 
 	if (0 != node_info.parmCount) {
 		hr->parm_infos_array = malloc_array(sizeof(HAPI_ParmInfo), node_info.parmCount, "houdini parameter info");
 
-		res = HAPI_GetParameters(&hr->hsession, hr->node_id, hr->parm_infos_array, 0, node_info.parmCount);
-		if (HAPI_RESULT_SUCCESS != res) {
-			ERR("Houdini error in HAPI_GetParameters: %u (%s)\n", res, HAPI_ResultMessage(res));
+		H_CHECK_OR(HAPI_GetParameters(&hr->hsession, hr->node_id, hr->parm_infos_array, 0, node_info.parmCount))
 			return;
-		}
 	}
 }
 
@@ -447,26 +441,17 @@ static void hruntime_fetch_parameters(HoudiniRuntime *hr) {
  */
 static void hruntime_get_parameter_name(HoudiniRuntime *hr, int parm_index, char *name) {
 	HAPI_Result res;
-	res = HAPI_GetString(&hr->hsession, hr->parm_infos_array[parm_index].nameSH, name, MOD_HOUDINI_MAX_PARAMETER_NAME);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_GetString: %u (%s)\n", res, HAPI_ResultMessage(res));
-	}
+	H_CHECK_OR(HAPI_GetString(&hr->hsession, hr->parm_infos_array[parm_index].nameSH, name, MOD_HOUDINI_MAX_PARAMETER_NAME)) {}
 }
 
 static void hruntime_set_float_parm(HoudiniRuntime *hr, int parm_index, const float *values, int length) {
 	HAPI_Result res;
-	res = HAPI_SetParmFloatValues(&hr->hsession, hr->node_id, values, hr->parm_infos_array[parm_index].floatValuesIndex, length);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_SetParmFloatValues: %u (%s)\n", res, HAPI_ResultMessage(res));
-	}
+	H_CHECK_OR(HAPI_SetParmFloatValues(&hr->hsession, hr->node_id, values, hr->parm_infos_array[parm_index].floatValuesIndex, length)) {}
 }
 
 static void hruntime_set_int_parm(HoudiniRuntime *hr, int parm_index, const int *values, int length) {
 	HAPI_Result res;
-	res = HAPI_SetParmIntValues(&hr->hsession, hr->node_id, values, hr->parm_infos_array[parm_index].intValuesIndex, length);
-	if (HAPI_RESULT_SUCCESS != res) {
-		ERR("Houdini error in HAPI_SetParmIntValues: %u (%s)\n", res, HAPI_ResultMessage(res));
-	}
+	H_CHECK_OR(HAPI_SetParmIntValues(&hr->hsession, hr->node_id, values, hr->parm_infos_array[parm_index].intValuesIndex, length)) {}
 }
 
 static bool hruntime_cook_asset(HoudiniRuntime *hr) {
@@ -849,6 +834,42 @@ static OfxStatus plugin_unload(PluginRuntime *runtime) {
 	return kOfxStatOK;
 }
 
+static void plugin_set_default_parameter(const PluginRuntime* runtime, OfxPropertySetHandle paramProps, const HAPI_ParmInfo *info)
+{
+	HAPI_Result res;
+	OfxStatus status;
+	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
+
+	if (info->size > 4)
+	{
+		printf("unsupported default value for parameter with dimension > 4");
+		return;
+	}
+
+	switch (info->type)
+	{
+	case HAPI_PARMTYPE_FLOAT:
+	case HAPI_PARMTYPE_COLOR:
+	{
+		double dvalues[4];
+		float fvalues[4];
+		H_CHECK_OR(HAPI_GetParmFloatValues(&hr->hsession, hr->node_id, fvalues, info->floatValuesIndex, info->size)) {}
+		for (int i = 0; i < info->size; ++i) {
+			dvalues[i] = (double)fvalues[i];
+		}
+		MFX_CHECK(propertySuite->propSetDoubleN(paramProps, kOfxParamPropDefault, info->size, dvalues));
+		break;
+	}
+	case HAPI_PARMTYPE_INT:
+	{
+		int values[4];
+		H_CHECK_OR(HAPI_GetParmIntValues(&hr->hsession, hr->node_id, values, info->intValuesIndex, info->size)) {}
+		MFX_CHECK(propertySuite->propSetIntN(paramProps, kOfxParamPropDefault, info->size, values));
+		break;
+	}
+	}
+}
+
 static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHandle meshEffect) {
 	if (NULL == runtime->propertySuite || NULL == runtime->meshEffectSuite) {
 		return kOfxStatErrMissingHostFeature;
@@ -875,6 +896,7 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 	// Declare parameters
 	OfxParamSetHandle parameters;
 	OfxParamHandle param;
+	OfxPropertySetHandle paramProps;
 	MFX_CHECK(meshEffectSuite->getParamSet(meshEffect, &parameters));
 
 	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
@@ -889,8 +911,8 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 
 		if (NULL != type && 0 == strncmp(name, "mfx_", 4)) {
 			printf("Defining parameter %s\n", name);
-			status = runtime->parameterSuite->paramDefine(parameters, type, name, NULL);
-			printf("Suite method 'paramDefine' returned status %d (%s)\n", status, getOfxStateName(status));
+			MFX_CHECK(parameterSuite->paramDefine(parameters, type, name, &paramProps));
+			plugin_set_default_parameter(runtime, paramProps, &info);
 		}
 	}
 	hruntime_destroy_node(hr);
