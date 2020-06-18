@@ -94,11 +94,13 @@ void hruntime_fill_vertex_attribute(
     Attribute uv_data,
     const char* attr_name);
 
+// vcolor_data may be null
 bool hruntime_feed_input_data(
     HoudiniRuntime* hr,
     Attribute point_data, int point_count,
     Attribute vertex_data, int vertex_count,
-    Attribute face_data, int face_count);
+    Attribute face_data, int face_count,
+    Attribute* vcolor_data);
 
 
 #define ERR(...) hruntime_set_error(hr, __VA_ARGS__)

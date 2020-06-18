@@ -124,3 +124,18 @@ size_t storageByteSize(HAPI_StorageType storage)
 		return 0;
 	}
 }
+
+HAPI_StorageType attribute_type_to_houdini_storage(enum AttributeType type)
+{
+	switch (type)
+	{
+	case MFX_UBYTE_ATTR:
+		return HAPI_STORAGETYPE_FLOAT; // requires conversion, ubytes are not supported by houdini
+	case MFX_INT_ATTR:
+		return HAPI_STORAGETYPE_INT;
+	case MFX_FLOAT_ATTR:
+		return HAPI_STORAGETYPE_FLOAT;
+	default:
+		return HAPI_STORAGETYPE_INVALID;
+	}
+}

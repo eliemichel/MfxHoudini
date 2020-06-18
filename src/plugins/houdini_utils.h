@@ -18,6 +18,7 @@
 #define H_HOUDINI_UTILS
 
 #include "HAPI/HAPI.h"
+#include "util/plugin_support.h"
 
 #define MAX_NUM_PLUGINS 10
 #define MAX_BUNDLE_DIRECTORY 1024
@@ -70,5 +71,7 @@ const char* HAPI_ResultMessage(HAPI_Result res);
 const char* houdini_to_ofx_type(HAPI_ParmType houdini_type, int size);
 
 size_t storageByteSize(HAPI_StorageType storage);
+
+HAPI_StorageType attribute_type_to_houdini_storage(enum AttributeType type);
 
 #endif // H_HOUDINI_UTILS

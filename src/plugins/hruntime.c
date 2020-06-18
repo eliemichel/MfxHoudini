@@ -635,6 +635,22 @@ void hruntime_fill_vertex_attribute(HoudiniRuntime* hr, Attribute attr_data, con
  */
 static char* contiguousAttributeData(Attribute attr, int count, bool* must_free)
 {
+	if (attr.type == MFX_UBYTE_ATTR)
+	{
+		// In this case we have to convert to int so we malloc anyway
+		*must_free = false;
+		int contiguous_stride = attr.componentCount * attributeTypeByteSize(MFX_FLOAT_ATTR);
+		char* contiguous_data = malloc_array(sizeof(char), contiguous_stride * count, "contiguous input data");
+		for (int i = 0; i < count; ++i) {
+			float* dst = (float*)(contiguous_data + contiguous_stride * i);
+			unsigned char* src = (unsigned char*)(attr.data + attr.stride * i);
+			for (int k = 0; k < attr.componentCount; ++k) {
+				dst[k] = (float)src[k]/255.0f;
+			}
+		}
+		return contiguous_data;
+	}
+
 	int minimum_stride = attr.componentCount * attributeTypeByteSize(attr.type);
 	bool is_contiguous = attr.stride == minimum_stride;
 	if (is_contiguous)
@@ -645,7 +661,7 @@ static char* contiguousAttributeData(Attribute attr, int count, bool* must_free)
 	else
 	{
 		*must_free = true;
-		char* contiguous_data = malloc_array(sizeof(char), minimum_stride * count, "contiguous input point data");
+		char* contiguous_data = malloc_array(sizeof(char), minimum_stride * count, "contiguous input data");
 		for (int i = 0; i < count; ++i) {
 			memcpy(contiguous_data + minimum_stride * i, attr.data + attr.stride * i, minimum_stride);
 		}
@@ -656,7 +672,8 @@ static char* contiguousAttributeData(Attribute attr, int count, bool* must_free)
 bool hruntime_feed_input_data(HoudiniRuntime* hr,
 	Attribute point_data, int point_count,
 	Attribute vertex_data, int vertex_count,
-	Attribute face_data, int face_count) {
+	Attribute face_data, int face_count,
+	Attribute *vcolor_data) {
 	HAPI_Result res;
 
 	if (hr->input_sop_id == -1) {
@@ -693,6 +710,23 @@ bool hruntime_feed_input_data(HoudiniRuntime* hr,
 	int* contiguous_face_data = (int*)contiguousAttributeData(face_data, face_count, &must_free);
 	H_CHECK(HAPI_SetFaceCounts(&hr->hsession, hr->input_sop_id, 0, contiguous_face_data, 0, face_count));
 	if (must_free) free_array(contiguous_face_data);
+
+	if (NULL != vcolor_data)
+	{
+		HAPI_AttributeInfo attrib_info = HAPI_AttributeInfo_Create();
+		attrib_info.exists = true;
+		attrib_info.owner = HAPI_ATTROWNER_VERTEX;
+		attrib_info.count = vertex_count;
+		attrib_info.tupleSize = vcolor_data->componentCount;
+		attrib_info.storage = attribute_type_to_houdini_storage(vcolor_data->type);
+		attrib_info.typeInfo = HAPI_ATTRIBUTE_TYPE_NONE;
+
+		H_CHECK(HAPI_AddAttribute(&hr->hsession, hr->input_sop_id, 0, "color0", &attrib_info));
+
+		float* contiguous_data = (float*)contiguousAttributeData(*vcolor_data, vertex_count, &must_free);
+		H_CHECK(HAPI_SetAttributeFloatData(&hr->hsession, hr->input_sop_id, 0, "color0", &attrib_info, contiguous_data, 0, vertex_count));
+		if (must_free) free_array(contiguous_data);
+	}
 
 	H_CHECK(HAPI_CommitGeo(&hr->hsession, hr->input_sop_id));
 

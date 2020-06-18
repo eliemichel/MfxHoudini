@@ -307,10 +307,15 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 
 	printf("DEBUG: Found %d points in input mesh\n", input_point_count);
 
+	Attribute input_vcolor;
+	status = getVertexAttribute(runtime, input_mesh, "color0", &input_vcolor);
+	Attribute *p_input_vcolor = status == kOfxStatOK ? &input_vcolor : NULL;
+
 	hruntime_feed_input_data(hr,
 		                     input_pos, input_point_count,
 		                     input_vertpoint, input_vertex_count,
-		                     input_facecounts, input_face_count);
+		                     input_facecounts, input_face_count,
+							 p_input_vcolor);
 	
 	MFX_CHECK(meshEffectSuite->inputReleaseMesh(input_mesh));
 
