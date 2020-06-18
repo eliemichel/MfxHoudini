@@ -482,11 +482,11 @@ void hruntime_fill_mesh(HoudiniRuntime* hr,
 				continue;
 
 			// Get Point data
-			float* part_point_data =
+			char* part_point_data =
 				is_point_contiguous
 				? point_data.data + point_data.stride * current_point
 				: malloc_array(minimum_point_stride, part_info.pointCount, "houdini point list");
-			H_CHECK_OR(HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, "P", &pos_attr_info, -1, part_point_data, 0, part_info.pointCount))
+			H_CHECK_OR(HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, "P", &pos_attr_info, -1, (float*)part_point_data, 0, part_info.pointCount))
 			{
 				if (!is_point_contiguous) free_array(part_point_data);
 				continue;
@@ -520,12 +520,12 @@ void hruntime_fill_mesh(HoudiniRuntime* hr,
 			free_array(part_vertex_data);
 
 			// Get face data
-			int* part_face_data =
+			char* part_face_data =
 				is_face_contiguous
 				? face_data.data + face_data.stride * current_face
 				: malloc_array(minimum_face_stride, part_info.faceCount, "houdini face list");
 
-			H_CHECK_OR(HAPI_GetFaceCounts(&hr->hsession, node_id, part_id, part_face_data, 0, part_info.faceCount))
+			H_CHECK_OR(HAPI_GetFaceCounts(&hr->hsession, node_id, part_id, (int*)part_face_data, 0, part_info.faceCount))
 			{
 				if (!is_face_contiguous) free_array(part_face_data);
 				continue;
@@ -593,11 +593,11 @@ void hruntime_fill_vertex_attribute(HoudiniRuntime* hr, Attribute attr_data, con
 			// Get Point data
 			size_t houdini_stride = attr_info.tupleSize * storageByteSize(attr_info.storage);
 			bool can_raw_copy = is_contiguous && minimum_stride == houdini_stride;
-			float* part_data =
+			char* part_data =
 				can_raw_copy
 				? attr_data.data + attr_data.stride * current_vertex
-				: malloc_array(minimum_stride, part_info.vertexCount, "houdini vertex attribute data");
-			H_CHECK_OR(HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, attr_name, &attr_info, -1, part_data, 0, part_info.vertexCount))
+				: malloc_array(houdini_stride, part_info.vertexCount, "houdini vertex attribute data");
+			H_CHECK_OR(HAPI_GetAttributeFloatData(&hr->hsession, node_id, part_id, attr_name, &attr_info, -1, (float*)part_data, 0, part_info.vertexCount))
 			{
 				if (!can_raw_copy) free_array(part_data);
 				continue;
@@ -610,7 +610,7 @@ void hruntime_fill_vertex_attribute(HoudiniRuntime* hr, Attribute attr_data, con
 					memcpy(
 						attr_data.data + attr_data.stride * (current_vertex + i),
 						part_data + houdini_stride * i,
-						minimum_stride);
+						min(minimum_stride, houdini_stride));
 				}
 				free_array(part_data);
 			}
