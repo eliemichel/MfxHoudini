@@ -672,8 +672,7 @@ static char* contiguousAttributeData(Attribute attr, int count, bool* must_free)
 bool hruntime_feed_input_data(HoudiniRuntime* hr,
 	Attribute point_data, int point_count,
 	Attribute vertex_data, int vertex_count,
-	Attribute face_data, int face_count,
-	Attribute *vcolor_data) {
+	Attribute face_data, int face_count) {
 	HAPI_Result res;
 
 	if (hr->input_sop_id == -1) {
@@ -711,26 +710,54 @@ bool hruntime_feed_input_data(HoudiniRuntime* hr,
 	H_CHECK(HAPI_SetFaceCounts(&hr->hsession, hr->input_sop_id, 0, contiguous_face_data, 0, face_count));
 	if (must_free) free_array(contiguous_face_data);
 
-	if (NULL != vcolor_data)
-	{
-		HAPI_AttributeInfo attrib_info = HAPI_AttributeInfo_Create();
-		attrib_info.exists = true;
-		attrib_info.owner = HAPI_ATTROWNER_VERTEX;
-		attrib_info.count = vertex_count;
-		attrib_info.tupleSize = vcolor_data->componentCount;
-		attrib_info.storage = attribute_type_to_houdini_storage(vcolor_data->type);
-		attrib_info.typeInfo = HAPI_ATTRIBUTE_TYPE_NONE;
+	return true;
+}
 
-		H_CHECK(HAPI_AddAttribute(&hr->hsession, hr->input_sop_id, 0, "color0", &attrib_info));
+bool hruntime_feed_vertex_attribute(
+	HoudiniRuntime* hr,
+	const char* attr_name,
+	Attribute attr_data, int vertex_count)
+{
+	HAPI_Result res;
+	bool must_free;
 
-		float* contiguous_data = (float*)contiguousAttributeData(*vcolor_data, vertex_count, &must_free);
-		H_CHECK(HAPI_SetAttributeFloatData(&hr->hsession, hr->input_sop_id, 0, "color0", &attrib_info, contiguous_data, 0, vertex_count));
-		if (must_free) free_array(contiguous_data);
-	}
+	HAPI_AttributeInfo attrib_info = HAPI_AttributeInfo_Create();
+	attrib_info.exists = true;
+	attrib_info.owner = HAPI_ATTROWNER_VERTEX;
+	attrib_info.count = vertex_count;
+	attrib_info.tupleSize = attr_data.componentCount;
+	attrib_info.storage = attribute_type_to_houdini_storage(attr_data.type);
+	attrib_info.typeInfo = HAPI_ATTRIBUTE_TYPE_NONE;
 
-	H_CHECK(HAPI_CommitGeo(&hr->hsession, hr->input_sop_id));
+	H_CHECK(HAPI_AddAttribute(&hr->hsession, hr->input_sop_id, 0, attr_name, &attrib_info));
+
+	float* contiguous_data = (float*)contiguousAttributeData(attr_data, vertex_count, &must_free);
+	H_CHECK(HAPI_SetAttributeFloatData(&hr->hsession, hr->input_sop_id, 0, attr_name, &attrib_info, contiguous_data, 0, vertex_count));
+	if (must_free) free_array(contiguous_data);
 
 	return true;
 }
 
+bool hruntime_commit_geo(HoudiniRuntime* hr)
+{
+	HAPI_Result res;
+	H_CHECK(HAPI_CommitGeo(&hr->hsession, hr->input_sop_id));
+	return true;
+}
 
+char* hruntime_get_cook_error(HoudiniRuntime* hr)
+{
+	HAPI_Result res;
+	int buffer_len;
+	H_CHECK_OR(HAPI_GetStatusStringBufLength(&hr->hsession, HAPI_STATUS_COOK_RESULT, HAPI_STATUSVERBOSITY_ERRORS, &buffer_len))
+		return NULL;
+
+	char* buf = malloc_array(1, buffer_len, "cook error message");
+	H_CHECK_OR(HAPI_GetStatusString(&hr->hsession, HAPI_STATUS_COOK_RESULT, buf, buffer_len))
+	{
+		free_array(buf);
+		return NULL;
+	}
+
+	return buf;
+}

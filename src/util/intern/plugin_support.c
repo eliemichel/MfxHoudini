@@ -20,6 +20,15 @@
 
 #define MFX_ENSURE(op) status = op; if (kOfxStatOK != status) return status;
 
+void loadPluginRuntimeSuites(PluginRuntime * runtime)
+{
+    OfxHost* h = runtime->host;
+    runtime->propertySuite = (OfxPropertySuiteV1*)h->fetchSuite(h->host, kOfxPropertySuite, 1);
+    runtime->parameterSuite = (OfxParameterSuiteV1*)h->fetchSuite(h->host, kOfxParameterSuite, 1);
+    runtime->meshEffectSuite = (OfxMeshEffectSuiteV1*)h->fetchSuite(h->host, kOfxMeshEffectSuite, 1);
+    runtime->messageSuite = (OfxMessageSuiteV2*)h->fetchSuite(h->host, kOfxMessageSuite, 2);
+}
+
 enum AttributeType mfxAttrAsEnum(const char *attr_type)
 {
   if (0 == strcmp(attr_type, kOfxMeshAttribTypeUByte)) {

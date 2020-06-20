@@ -94,14 +94,26 @@ void hruntime_fill_vertex_attribute(
     Attribute uv_data,
     const char* attr_name);
 
-// vcolor_data may be null
 bool hruntime_feed_input_data(
     HoudiniRuntime* hr,
     Attribute point_data, int point_count,
     Attribute vertex_data, int vertex_count,
-    Attribute face_data, int face_count,
-    Attribute* vcolor_data);
+    Attribute face_data, int face_count);
 
+bool hruntime_feed_vertex_attribute(
+    HoudiniRuntime* hr,
+    const char *attr_name,
+    Attribute attr_data, int vertex_count);
+
+/**
+ * /post hruntime_feed_input_data will not longer be called, nor hruntime_feed_vertex_attribute
+ */
+bool hruntime_commit_geo(HoudiniRuntime* hr);
+
+/**
+ * If the returned message is not null, caller must free it itself
+ */
+char* hruntime_get_cook_error(HoudiniRuntime* hr);
 
 #define ERR(...) hruntime_set_error(hr, __VA_ARGS__)
 

@@ -25,6 +25,7 @@
 #define __MFX_PLUGIN_SUPPORT_H__
 
 #include "ofxCore.h"
+#include "ofxMessage.h"
 #include "ofxMeshEffect.h"
 
 typedef struct PluginRuntime {
@@ -34,6 +35,7 @@ typedef struct PluginRuntime {
     const OfxPropertySuiteV1 *propertySuite;
     const OfxParameterSuiteV1 *parameterSuite;
     const OfxMeshEffectSuiteV1 *meshEffectSuite;
+    const OfxMessageSuiteV2* messageSuite;
     void* userData;
 } PluginRuntime;
 
@@ -50,6 +52,11 @@ typedef struct Attribute {
   int componentCount;
   char *data;
 } Attribute;
+
+/**
+ * Expect that host has been set and that we are in the kOfxPluginLoad action
+ */
+void loadPluginRuntimeSuites(PluginRuntime* runtime);
 
 /**
  * Convert a type string from MeshEffect API to its local enum counterpart

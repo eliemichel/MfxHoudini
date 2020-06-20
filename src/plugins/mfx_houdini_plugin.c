@@ -52,22 +52,9 @@ const char * get_hda_path() {
 }
 
 // OFX
-/*
-typedef struct PluginRuntime {
-	OfxPlugin plugin;
-	int pluginIndex;
-	OfxHost *host;
-	OfxPropertySuiteV1 *propertySuite;
-	OfxParameterSuiteV1 *parameterSuite;
-	OfxMeshEffectSuiteV1 *meshEffectSuite;
-	HoudiniRuntime *houdiniRuntime;
-} PluginRuntime;
-*/
+
 static OfxStatus plugin_load(PluginRuntime *runtime) {
-	OfxHost *h = runtime->host;
-	runtime->propertySuite = (OfxPropertySuiteV1*)h->fetchSuite(h->host, kOfxPropertySuite, 1);
-	runtime->parameterSuite = (OfxParameterSuiteV1*)h->fetchSuite(h->host, kOfxParameterSuite, 1);
-	runtime->meshEffectSuite = (OfxMeshEffectSuiteV1*)h->fetchSuite(h->host, kOfxMeshEffectSuite, 1);
+	loadPluginRuntimeSuites(runtime);
 	runtime->userData = malloc_array(sizeof(HoudiniRuntime), 1, "houdini runtime");
 	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
 	if (false == hruntime_init(hr)) {
@@ -190,10 +177,6 @@ static OfxStatus plugin_destroy_instance(const PluginRuntime *runtime, OfxMeshEf
 	return kOfxStatOK;
 }
 
-static void log_status() {
-
-}
-
 static void copy_d4_to_f4(float float_values[4], double double_values[4]) {
 	float_values[0] = (float)double_values[0];
 	float_values[1] = (float)double_values[1];
@@ -202,6 +185,7 @@ static void copy_d4_to_f4(float float_values[4], double double_values[4]) {
 }
 
 static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAPI_ParmType type, int size, OfxParamHandle param) {
+	OfxStatus status;
 	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
 	double double_values[4];
 	float float_values[4];
@@ -212,13 +196,13 @@ static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAP
 		case 0:
 			size = 1;
 		case 1:
-			runtime->parameterSuite->paramGetValue(param, int_values+0);
+			MFX_CHECK(parameterSuite->paramGetValue(param, int_values+0));
 			break;
 		case 2:
-			runtime->parameterSuite->paramGetValue(param, int_values+0, int_values+1);
+			MFX_CHECK(parameterSuite->paramGetValue(param, int_values+0, int_values+1));
 			break;
 		case 3:
-			runtime->parameterSuite->paramGetValue(param, int_values+0, int_values+1, int_values+2);
+			MFX_CHECK(parameterSuite->paramGetValue(param, int_values+0, int_values+1, int_values+2));
 			break;
 		default:
 			return false;
@@ -230,13 +214,13 @@ static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAP
 		case 0:
 			size = 1;
 		case 1:
-			runtime->parameterSuite->paramGetValue(param, double_values+0);
+			MFX_CHECK(parameterSuite->paramGetValue(param, double_values+0));
 			break;
 		case 2:
-			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1);
+			MFX_CHECK(parameterSuite->paramGetValue(param, double_values+0, double_values+1));
 			break;
 		case 3:
-			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2);
+			MFX_CHECK(parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2));
 			break;
 		default:
 			return false;
@@ -247,10 +231,10 @@ static bool plugin_get_parm_from_ofx(PluginRuntime *runtime, int parm_index, HAP
 	case HAPI_PARMTYPE_COLOR:
 		switch (size) {
 		case 3:
-			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2);
+			MFX_CHECK(parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2));
 			break;
 		case 4:
-			runtime->parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2, double_values+3);
+			MFX_CHECK(parameterSuite->paramGetValue(param, double_values+0, double_values+1, double_values+2, double_values+3));
 			break;
 		default:
 			return false;
@@ -273,17 +257,15 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	HoudiniRuntime* hr = (HoudiniRuntime*)runtime->userData;
 
 	// Set node id in houdini runtime to match this mesh effect instance
-	runtime->meshEffectSuite->getPropertySet(meshEffect, &effectProperties);
-	runtime->propertySuite->propGetInt(effectProperties, kOfxPropHoudiniNodeId, 0, &hr->node_id);
+	MFX_CHECK(meshEffectSuite->getPropertySet(meshEffect, &effectProperties));
+	MFX_CHECK(propertySuite->propGetInt(effectProperties, kOfxPropHoudiniNodeId, 0, &hr->node_id));
 
-	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kOfxMeshMainInput, &input, &propertySet);
-	printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->inputGetHandle(meshEffect, kOfxMeshMainInput, &input, &propertySet));
 	if (status != kOfxStatOK) {
 		return kOfxStatErrUnknown;
 	}
 
-	status = runtime->meshEffectSuite->inputGetHandle(meshEffect, kOfxMeshMainOutput, &output, &propertySet);
-	printf("Suite method 'inputGetHandle' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->inputGetHandle(meshEffect, kOfxMeshMainOutput, &output, &propertySet));
 	if (status != kOfxStatOK) {
 		return kOfxStatErrUnknown;
 	}
@@ -307,16 +289,21 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 
 	printf("DEBUG: Found %d points in input mesh\n", input_point_count);
 
-	Attribute input_vcolor;
-	status = getVertexAttribute(runtime, input_mesh, "color0", &input_vcolor);
-	Attribute *p_input_vcolor = status == kOfxStatOK ? &input_vcolor : NULL;
-
 	hruntime_feed_input_data(hr,
 		                     input_pos, input_point_count,
 		                     input_vertpoint, input_vertex_count,
-		                     input_facecounts, input_face_count,
-							 p_input_vcolor);
+		                     input_facecounts, input_face_count);
 	
+	Attribute input_vertex_attr;
+	if (kOfxStatOK == getVertexAttribute(runtime, input_mesh, "color0", &input_vertex_attr)) {
+		hruntime_feed_vertex_attribute(hr, "Cd", input_vertex_attr, input_vertex_count);
+	}
+	if (kOfxStatOK == getVertexAttribute(runtime, input_mesh, "uv0", &input_vertex_attr)) {
+		hruntime_feed_vertex_attribute(hr, "uv", input_vertex_attr, input_vertex_count);
+	}
+
+	hruntime_commit_geo(hr);
+
 	MFX_CHECK(meshEffectSuite->inputReleaseMesh(input_mesh));
 
 	// Get parameters
@@ -342,6 +329,11 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	// Core cook
 
 	if (false == hruntime_cook_asset(hr)) {
+		char* message = hruntime_get_cook_error(hr);
+		if (NULL != message) {
+			MFX_CHECK(messageSuite->setPersistentMessage(meshEffect, kOfxMessageError, NULL, message));
+			free_array(message);
+		}
 		return kOfxStatErrUnknown;
 	}
 	if (false == hruntime_fetch_sops(hr)) {
@@ -350,8 +342,7 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 
 	OfxMeshHandle output_mesh;
 	OfxPropertySetHandle output_mesh_prop;
-	status = runtime->meshEffectSuite->inputGetMesh(output, time, &output_mesh, &output_mesh_prop);
-	printf("Suite method 'inputGetMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->inputGetMesh(output, time, &output_mesh, &output_mesh_prop));
 
 	// Consolidate geo counts
 	int output_point_count = 0, output_vertex_count = 0, output_face_count = 0;
@@ -391,8 +382,7 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 		hruntime_fill_vertex_attribute(hr, output_uv, "uv");
 	}
 
-	status = runtime->meshEffectSuite->inputReleaseMesh(output_mesh);
-	printf("Suite method 'inputReleaseMesh' returned status %d (%s)\n", status, getOfxStateName(status));
+	MFX_CHECK(meshEffectSuite->inputReleaseMesh(output_mesh));
 
 	return kOfxStatOK;
 }
