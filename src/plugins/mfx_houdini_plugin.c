@@ -115,6 +115,7 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 
 	OfxStatus status;
 	OfxPropertySetHandle propHandle;
+	OfxMeshInputHandle input, output;
 
 	MFX_CHECK(meshEffectSuite->getPropertySet(meshEffect, &propHandle));
 
@@ -122,12 +123,12 @@ static OfxStatus plugin_describe(const PluginRuntime *runtime, OfxMeshEffectHand
 
 	// Shall move into "describe in context" when it will exist
 	OfxPropertySetHandle inputProperties;
-	MFX_CHECK(meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainInput, &inputProperties));
+	MFX_CHECK(meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainInput, &input, &inputProperties));
 
 	MFX_CHECK(propertySuite->propSetString(inputProperties, kOfxPropLabel, 0, "Main Input"));
 
 	OfxPropertySetHandle outputProperties;
-	MFX_CHECK(meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainOutput, &outputProperties)); // yes, output are also "inputs", I should change this name in the API
+	MFX_CHECK(meshEffectSuite->inputDefine(meshEffect, kOfxMeshMainOutput, &output, &outputProperties)); // yes, output are also "inputs", I should change this name in the API
 	
 	MFX_CHECK(propertySuite->propSetString(outputProperties, kOfxPropLabel, 0, "Main Output"));
 
@@ -279,13 +280,13 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	// Get input data
 	int input_point_count = 0, input_vertex_count = 0, input_face_count = 0;
 	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropPointCount, 0, &input_point_count));
-	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropVertexCount, 0, &input_vertex_count));
+	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshAttribCornerPoint, 0, &input_vertex_count));
 	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropFaceCount, 0, &input_face_count));
 
 	Attribute input_pos, input_vertpoint, input_facecounts;
 	MFX_CHECK2(getPointAttribute(runtime, input_mesh, kOfxMeshAttribPointPosition, &input_pos));
-	MFX_CHECK2(getVertexAttribute(runtime, input_mesh, kOfxMeshAttribVertexPoint, &input_vertpoint));
-	MFX_CHECK2(getFaceAttribute(runtime, input_mesh, kOfxMeshAttribFaceCounts, &input_facecounts));
+	MFX_CHECK2(getVertexAttribute(runtime, input_mesh, kOfxMeshAttribCornerPoint, &input_vertpoint));
+	MFX_CHECK2(getFaceAttribute(runtime, input_mesh, kOfxMeshAttribFaceSize, &input_facecounts));
 
 	printf("DEBUG: Found %d points in input mesh\n", input_point_count);
 
@@ -354,22 +355,22 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	printf("DEBUG: Allocating output mesh data: %d points, %d vertices, %d faces\n", output_point_count, output_vertex_count, output_face_count);
 
 	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropPointCount, 0, output_point_count));
-	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropVertexCount, 0, output_vertex_count));
+	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropCornerCount, 0, output_vertex_count));
 	MFX_CHECK(propertySuite->propSetInt(output_mesh_prop, kOfxMeshPropFaceCount, 0, output_face_count));
 
 	// Declare output attributes
 	bool has_uv = hruntime_has_vertex_attribute(hr, "uv");
 	if (has_uv) {
 		OfxPropertySetHandle uv_attrib;
-		MFX_CHECK(meshEffectSuite->attributeDefine(output_mesh, kOfxMeshAttribVertex, "uv0", 2, kOfxMeshAttribTypeFloat, &uv_attrib));
+		MFX_CHECK(meshEffectSuite->attributeDefine(output_mesh, kOfxMeshAttribCorner, "uv0", 2, kOfxMeshAttribTypeFloat, kOfxMeshAttribSemanticTextureCoordinate , &uv_attrib));
 	}
 
 	MFX_CHECK(meshEffectSuite->meshAlloc(output_mesh));
 
 	Attribute output_pos, output_vertpoint, output_facecounts, output_uv;
 	MFX_CHECK2(getPointAttribute(runtime, output_mesh, kOfxMeshAttribPointPosition, &output_pos));
-	MFX_CHECK2(getVertexAttribute(runtime, output_mesh, kOfxMeshAttribVertexPoint, &output_vertpoint));
-	MFX_CHECK2(getFaceAttribute(runtime, output_mesh, kOfxMeshAttribFaceCounts, &output_facecounts));
+	MFX_CHECK2(getVertexAttribute(runtime, output_mesh, kOfxMeshAttribCornerPoint, &output_vertpoint));
+	MFX_CHECK2(getFaceAttribute(runtime, output_mesh, kOfxMeshAttribFaceSize, &output_facecounts));
 
 	// Fill data
 	hruntime_fill_mesh(hr,
