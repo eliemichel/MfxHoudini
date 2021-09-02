@@ -280,7 +280,7 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	// Get input data
 	int input_point_count = 0, input_vertex_count = 0, input_face_count = 0;
 	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropPointCount, 0, &input_point_count));
-	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshAttribCornerPoint, 0, &input_vertex_count));
+	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropCornerCount, 0, &input_vertex_count));
 	MFX_CHECK(propertySuite->propGetInt(input_mesh_prop, kOfxMeshPropFaceCount, 0, &input_face_count));
 
 	Attribute input_pos, input_vertpoint, input_facecounts;
