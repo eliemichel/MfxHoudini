@@ -50,6 +50,31 @@ if (HAPI_RESULT_SUCCESS != res) { \
 } \
 if (HAPI_RESULT_SUCCESS != res) \
 
+#include <Windows.h>
+static void houdini_output_debug_printf(const char* strOutputString, ...)
+{
+    char strBuffer[4096] = { 0 };
+    va_list vlArgs;
+    va_start(vlArgs, strOutputString);
+
+    _vsnprintf_s(strBuffer, sizeof(strBuffer) - 1, sizeof(strBuffer) - 1, strOutputString, vlArgs);
+    va_end(vlArgs);
+    printf(strBuffer);
+    OutputDebugStringA(strBuffer);
+}
+
+#include <time.h>
+
+#define MFX_CLOCK_CONCAT_INDIRECT(x,y) x##y
+
+#define MFX_CLOCK_CONCAT(x,y) MFX_CLOCK_CONCAT_INDIRECT(x,y)
+
+#define MFX_CLOCK_BEGIN(action) clock_t MFX_CLOCK_CONCAT(before, action) = clock();
+
+#define MFX_CLOCK_END(action) clock_t MFX_CLOCK_CONCAT(difference, action) = clock() - MFX_CLOCK_CONCAT(before, action);\
+int MFX_CLOCK_CONCAT(msec, action) = MFX_CLOCK_CONCAT(difference, action) * 1000 / CLOCKS_PER_SEC;\
+houdini_output_debug_printf("%s time cost %d ms\n", #action, MFX_CLOCK_CONCAT(msec, action));
+
  // Utils
 
 inline int max(int a, int b) {

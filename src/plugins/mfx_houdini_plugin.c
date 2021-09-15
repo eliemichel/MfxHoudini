@@ -290,6 +290,8 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 
 	printf("DEBUG: Found %d points in input mesh\n", input_point_count);
 
+	MFX_CLOCK_BEGIN(hruntime_feed_input_data);
+
 	hruntime_feed_input_data(hr,
 		                     input_pos, input_point_count,
 		                     input_vertpoint, input_vertex_count,
@@ -303,13 +305,20 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 		hruntime_feed_vertex_attribute(hr, "uv", input_vertex_attr, input_vertex_count);
 	}
 
+	MFX_CLOCK_END(hruntime_feed_input_data);
+
+	MFX_CLOCK_BEGIN(hruntime_commit_geo);
 	hruntime_commit_geo(hr);
+	MFX_CLOCK_END(hruntime_commit_geo);
 
 	MFX_CHECK(meshEffectSuite->inputReleaseMesh(input_mesh));
 
 	// Get parameters
 	OfxParamSetHandle parameters;
 	OfxParamHandle param;
+
+	MFX_CLOCK_BEGIN(hruntime_get_parameter_name);
+
 	MFX_CHECK(meshEffectSuite->getParamSet(meshEffect, &parameters));
 
 	char name[MOD_HOUDINI_MAX_PARAMETER_NAME];
@@ -327,8 +336,11 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 		}
 	}
 
+	MFX_CLOCK_END(hruntime_get_parameter_name);
+
 	// Core cook
 
+	MFX_CLOCK_BEGIN(hruntime_cook_asset);
 	if (false == hruntime_cook_asset(hr)) {
 		char* message = hruntime_get_cook_error(hr);
 		if (NULL != message) {
@@ -337,12 +349,18 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 		}
 		return kOfxStatErrUnknown;
 	}
+	MFX_CLOCK_END(hruntime_cook_asset);
+
+	MFX_CLOCK_BEGIN(hruntime_fetch_sops);
 	if (false == hruntime_fetch_sops(hr)) {
 		return kOfxStatErrUnknown;
 	}
 
+	MFX_CLOCK_END(hruntime_fetch_sops);
+
 	OfxMeshHandle output_mesh;
 	OfxPropertySetHandle output_mesh_prop;
+	MFX_CLOCK_BEGIN(hruntime_consolidate_geo_counts);
 	MFX_CHECK(meshEffectSuite->inputGetMesh(output, time, &output_mesh, &output_mesh_prop));
 
 	// Consolidate geo counts
@@ -372,16 +390,21 @@ static OfxStatus plugin_cook(PluginRuntime *runtime, OfxMeshEffectHandle meshEff
 	MFX_CHECK2(getVertexAttribute(runtime, output_mesh, kOfxMeshAttribCornerPoint, &output_vertpoint));
 	MFX_CHECK2(getFaceAttribute(runtime, output_mesh, kOfxMeshAttribFaceSize, &output_facecounts));
 
+	MFX_CLOCK_END(hruntime_consolidate_geo_counts);
+
+	MFX_CLOCK_BEGIN(hruntime_fill_mesh);
 	// Fill data
 	hruntime_fill_mesh(hr,
-		               output_pos, output_point_count,
-		               output_vertpoint, output_vertex_count,
-		               output_facecounts, output_face_count);
+		output_pos, output_point_count,
+		output_vertpoint, output_vertex_count,
+		output_facecounts, output_face_count);
 
 	if (has_uv) {
 		MFX_CHECK2(getVertexAttribute(runtime, output_mesh, "uv0", &output_uv));
 		hruntime_fill_vertex_attribute(hr, output_uv, "uv");
 	}
+
+	MFX_CLOCK_END(hruntime_fill_mesh);
 
 	MFX_CHECK(meshEffectSuite->inputReleaseMesh(output_mesh));
 
