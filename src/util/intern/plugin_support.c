@@ -85,7 +85,7 @@ OfxStatus getPointAttribute(PluginRuntime* runtime, OfxMeshHandle mesh, const ch
 
 OfxStatus getVertexAttribute(PluginRuntime* runtime, OfxMeshHandle mesh, const char *name, Attribute *attr)
 {
-  return getAttribute(runtime, mesh, kOfxMeshAttribVertex, name, attr);
+  return getAttribute(runtime, mesh, kOfxMeshAttribCorner, name, attr);
 }
 
 OfxStatus getFaceAttribute(PluginRuntime* runtime, OfxMeshHandle mesh, const char *name, Attribute *attr)
